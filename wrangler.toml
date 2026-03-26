@@ -1,0 +1,15 @@
+name = "loyalty-program"
+main = "src/index.ts"
+compatibility_date = "2024-11-01"
+compatibility_flags = ["nodejs_compat"]
+
+[vars]
+CLOUDCART_BASE_URL = "https://smokezone.cloudcart.net/api/v2"
+ADMIN_USERNAME = "admin"
+
+# Secrets — set via: wrangler secret put <KEY>
+# CLOUDCART_API_KEY
+# SUPABASE_URL
+# SUPABASE_SERVICE_KEY
+# ADMIN_PASSWORD
+# WEBHOOK_SECRET   (any random string, stored in CloudCart webhook request headers)

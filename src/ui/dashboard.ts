@@ -1,0 +1,708 @@
+export const dashboardHtml = /* html */ `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Loyalty Program — Admin</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+  <style>
+    [x-cloak] { display: none !important; }
+    .tab-active { @apply border-b-2 border-violet-600 text-violet-700 font-semibold; }
+  </style>
+</head>
+<body class="bg-gray-50 text-gray-800 font-sans">
+
+<div x-data="app()" x-init="init()" x-cloak>
+
+  <!-- Header -->
+  <header class="bg-white border-b shadow-sm sticky top-0 z-10">
+    <div class="max-w-7xl mx-auto px-4 py-3 flex items-center justify-between">
+      <div class="flex items-center gap-3">
+        <span class="text-2xl">🎯</span>
+        <div>
+          <h1 class="font-bold text-lg leading-tight" x-text="settings.store_name + ' — Loyalty'">Loyalty Admin</h1>
+          <p class="text-xs text-gray-400">CRM Dashboard</p>
+        </div>
+      </div>
+      <div class="flex gap-2">
+        <button @click="runSetup()" class="text-xs bg-violet-600 text-white px-3 py-1.5 rounded-lg hover:bg-violet-700">
+          ⚙️ Run Setup
+        </button>
+        <button @click="syncExisting()" class="text-xs bg-gray-100 px-3 py-1.5 rounded-lg hover:bg-gray-200">
+          🔄 Sync Customers
+        </button>
+      </div>
+    </div>
+    <!-- Tabs -->
+    <div class="max-w-7xl mx-auto px-4 flex gap-6 text-sm text-gray-500 border-t">
+      <template x-for="tab in tabs" :key="tab.id">
+        <button
+          @click="activeTab = tab.id"
+          :class="activeTab === tab.id ? 'tab-active' : 'hover:text-gray-700'"
+          class="py-2 px-1 transition-colors"
+          x-text="tab.label">
+        </button>
+      </template>
+    </div>
+  </header>
+
+  <main class="max-w-7xl mx-auto px-4 py-6">
+
+    <!-- Toast -->
+    <div x-show="toast.msg" x-transition
+      :class="toast.type === 'error' ? 'bg-red-500' : 'bg-green-500'"
+      class="fixed top-4 right-4 z-50 text-white px-4 py-2 rounded-lg shadow text-sm"
+      x-text="toast.msg">
+    </div>
+
+    <!-- ===== OVERVIEW ===== -->
+    <div x-show="activeTab === 'overview'">
+      <h2 class="text-lg font-semibold mb-4">Overview</h2>
+
+      <!-- Stats cards -->
+      <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+        <div class="bg-white rounded-xl p-4 shadow-sm border">
+          <p class="text-xs text-gray-400 mb-1">Total Customers</p>
+          <p class="text-2xl font-bold text-violet-600" x-text="stats.total_customers ?? '—'"></p>
+        </div>
+        <div class="bg-white rounded-xl p-4 shadow-sm border">
+          <p class="text-xs text-gray-400 mb-1">Points Outstanding</p>
+          <p class="text-2xl font-bold text-amber-500" x-text="(stats.total_points_outstanding ?? 0).toLocaleString()"></p>
+        </div>
+        <div class="bg-white rounded-xl p-4 shadow-sm border">
+          <p class="text-xs text-gray-400 mb-1">Total Transactions</p>
+          <p class="text-2xl font-bold text-blue-500" x-text="stats.total_transactions ?? '—'"></p>
+        </div>
+        <div class="bg-white rounded-xl p-4 shadow-sm border">
+          <p class="text-xs text-gray-400 mb-1">Points → € Rate</p>
+          <p class="text-2xl font-bold text-green-500">
+            <span x-text="settings.points_to_eur_rate"></span> pts = €1
+          </p>
+        </div>
+      </div>
+
+      <!-- Tier distribution -->
+      <div class="bg-white rounded-xl shadow-sm border p-4 mb-6">
+        <h3 class="font-semibold mb-3 text-sm text-gray-600">Tier Distribution</h3>
+        <div class="flex flex-wrap gap-3">
+          <template x-for="(count, tierName) in stats.tier_distribution" :key="tierName">
+            <div class="bg-gray-50 rounded-lg px-3 py-2 text-center min-w-[80px]">
+              <p class="text-xs text-gray-400" x-text="tierName"></p>
+              <p class="text-lg font-bold text-violet-600" x-text="count"></p>
+            </div>
+          </template>
+        </div>
+      </div>
+
+      <!-- Recent transactions -->
+      <div class="bg-white rounded-xl shadow-sm border p-4">
+        <h3 class="font-semibold mb-3 text-sm text-gray-600">Recent Activity</h3>
+        <div class="space-y-2">
+          <template x-for="tx in stats.recent_transactions" :key="tx.id">
+            <div class="flex items-center justify-between text-sm py-1 border-b last:border-0">
+              <div>
+                <span class="font-medium" x-text="tx.loyalty_customers?.email ?? '—'"></span>
+                <span class="text-gray-400 ml-2" x-text="tx.description"></span>
+              </div>
+              <div :class="tx.points > 0 ? 'text-green-600' : 'text-red-500'" class="font-semibold">
+                <span x-text="(tx.points > 0 ? '+' : '') + tx.points.toLocaleString()"></span>
+                <span class="text-gray-400 ml-1">pts</span>
+              </div>
+            </div>
+          </template>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===== CUSTOMERS ===== -->
+    <div x-show="activeTab === 'customers'">
+      <div class="flex items-center justify-between mb-4">
+        <h2 class="text-lg font-semibold">Customers</h2>
+        <input
+          x-model="customerSearch"
+          @input.debounce.400ms="loadCustomers(1)"
+          type="search"
+          placeholder="Search email / name…"
+          class="border rounded-lg px-3 py-1.5 text-sm w-56 focus:outline-none focus:ring-2 focus:ring-violet-300"
+        />
+      </div>
+
+      <div class="bg-white rounded-xl shadow-sm border overflow-hidden">
+        <table class="w-full text-sm">
+          <thead class="bg-gray-50 text-xs text-gray-500 uppercase tracking-wide">
+            <tr>
+              <th class="px-4 py-3 text-left">Customer</th>
+              <th class="px-4 py-3 text-right">Points</th>
+              <th class="px-4 py-3 text-center">Tier</th>
+              <th class="px-4 py-3 text-center">Promo Code</th>
+              <th class="px-4 py-3 text-center">€ Value</th>
+              <th class="px-4 py-3 text-center">Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            <template x-for="cust in customers.data" :key="cust.id">
+              <tr class="border-t hover:bg-gray-50">
+                <td class="px-4 py-3">
+                  <p class="font-medium" x-text="(cust.first_name ?? '') + ' ' + (cust.last_name ?? '')"></p>
+                  <p class="text-xs text-gray-400" x-text="cust.email"></p>
+                </td>
+                <td class="px-4 py-3 text-right font-semibold text-violet-600"
+                  x-text="(cust.points_balance ?? 0).toLocaleString()"></td>
+                <td class="px-4 py-3 text-center">
+                  <span x-show="cust.tiers"
+                    class="text-xs px-2 py-0.5 rounded-full bg-violet-100 text-violet-700 font-medium"
+                    x-text="cust.tiers?.name"></span>
+                  <span x-show="!cust.tiers" class="text-gray-300 text-xs">—</span>
+                </td>
+                <td class="px-4 py-3 text-center text-xs font-mono text-gray-600" x-text="cust.promo_code ?? '—'"></td>
+                <td class="px-4 py-3 text-center text-sm font-semibold text-green-600"
+                  x-text="'€' + Math.floor((cust.points_balance ?? 0) / settings.points_to_eur_rate)">
+                </td>
+                <td class="px-4 py-3 text-center">
+                  <button @click="openAdjust(cust)"
+                    class="text-xs bg-violet-50 text-violet-700 px-2 py-1 rounded hover:bg-violet-100 mr-1">
+                    Adjust
+                  </button>
+                  <button @click="syncCustomer(cust)"
+                    class="text-xs bg-gray-50 text-gray-600 px-2 py-1 rounded hover:bg-gray-100">
+                    Sync
+                  </button>
+                </td>
+              </tr>
+            </template>
+            <tr x-show="!customers.data?.length">
+              <td colspan="6" class="px-4 py-8 text-center text-gray-400 text-sm">No customers found</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <!-- Pagination -->
+        <div class="px-4 py-3 bg-gray-50 border-t flex items-center justify-between text-xs text-gray-500">
+          <span>Total: <strong x-text="customers.total ?? 0"></strong></span>
+          <div class="flex gap-2">
+            <button @click="loadCustomers(customers.page - 1)"
+              :disabled="customers.page <= 1"
+              class="px-2 py-1 rounded border hover:bg-white disabled:opacity-40">← Prev</button>
+            <span class="px-2 py-1" x-text="'Page ' + (customers.page ?? 1)"></span>
+            <button @click="loadCustomers(customers.page + 1)"
+              :disabled="(customers.page * customers.size) >= customers.total"
+              class="px-2 py-1 rounded border hover:bg-white disabled:opacity-40">Next →</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===== TRANSACTIONS ===== -->
+    <div x-show="activeTab === 'transactions'">
+      <h2 class="text-lg font-semibold mb-4">Transaction Log</h2>
+      <div class="bg-white rounded-xl shadow-sm border overflow-hidden">
+        <table class="w-full text-sm">
+          <thead class="bg-gray-50 text-xs text-gray-500 uppercase tracking-wide">
+            <tr>
+              <th class="px-4 py-3 text-left">Date</th>
+              <th class="px-4 py-3 text-left">Customer</th>
+              <th class="px-4 py-3 text-left">Type</th>
+              <th class="px-4 py-3 text-right">Points</th>
+              <th class="px-4 py-3 text-left">Description</th>
+              <th class="px-4 py-3 text-right">Order Value</th>
+            </tr>
+          </thead>
+          <tbody>
+            <template x-for="tx in transactions.data" :key="tx.id">
+              <tr class="border-t hover:bg-gray-50">
+                <td class="px-4 py-2 text-gray-400 text-xs" x-text="new Date(tx.created_at).toLocaleDateString()"></td>
+                <td class="px-4 py-2">
+                  <span x-text="tx.loyalty_customers?.email ?? '—'" class="text-xs"></span>
+                </td>
+                <td class="px-4 py-2">
+                  <span :class="{
+                    'bg-green-100 text-green-700': tx.type === 'earn',
+                    'bg-blue-100 text-blue-700': tx.type === 'redeem',
+                    'bg-amber-100 text-amber-700': tx.type === 'adjust',
+                    'bg-red-100 text-red-700': tx.type === 'expire',
+                  }" class="text-xs px-2 py-0.5 rounded-full font-medium" x-text="tx.type"></span>
+                </td>
+                <td class="px-4 py-2 text-right font-semibold"
+                  :class="tx.points >= 0 ? 'text-green-600' : 'text-red-500'"
+                  x-text="(tx.points > 0 ? '+' : '') + tx.points.toLocaleString()">
+                </td>
+                <td class="px-4 py-2 text-gray-500 text-xs" x-text="tx.description"></td>
+                <td class="px-4 py-2 text-right text-xs text-gray-400"
+                  x-text="tx.order_value_cents ? '€' + (tx.order_value_cents/100).toFixed(2) : '—'">
+                </td>
+              </tr>
+            </template>
+          </tbody>
+        </table>
+        <div class="px-4 py-3 bg-gray-50 border-t flex items-center justify-between text-xs text-gray-500">
+          <span>Total: <strong x-text="transactions.total ?? 0"></strong></span>
+          <div class="flex gap-2">
+            <button @click="loadTransactions(transactions.page - 1)"
+              :disabled="transactions.page <= 1"
+              class="px-2 py-1 rounded border hover:bg-white disabled:opacity-40">← Prev</button>
+            <span x-text="'Page ' + (transactions.page ?? 1)" class="px-2 py-1"></span>
+            <button @click="loadTransactions(transactions.page + 1)"
+              :disabled="(transactions.page * transactions.size) >= transactions.total"
+              class="px-2 py-1 rounded border hover:bg-white disabled:opacity-40">Next →</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===== TIERS ===== -->
+    <div x-show="activeTab === 'tiers'">
+      <div class="flex items-center justify-between mb-4">
+        <h2 class="text-lg font-semibold">Loyalty Tiers</h2>
+        <button @click="openTierForm(null)" class="text-xs bg-violet-600 text-white px-3 py-1.5 rounded-lg hover:bg-violet-700">
+          + Add Tier
+        </button>
+      </div>
+      <div class="grid gap-3">
+        <template x-for="tier in tiers" :key="tier.id">
+          <div class="bg-white rounded-xl shadow-sm border p-4 flex items-center justify-between">
+            <div>
+              <p class="font-semibold" x-text="tier.name"></p>
+              <p class="text-xs text-gray-400">
+                Starts at <strong x-text="tier.min_points.toLocaleString()"></strong> points
+                <span x-show="tier.cloudcart_group_id"> · CloudCart group #<span x-text="tier.cloudcart_group_id"></span></span>
+              </p>
+            </div>
+            <div class="flex gap-2">
+              <button @click="openTierForm(tier)" class="text-xs bg-gray-100 px-3 py-1.5 rounded hover:bg-gray-200">Edit</button>
+              <button @click="deleteTier(tier.id)" class="text-xs bg-red-50 text-red-600 px-3 py-1.5 rounded hover:bg-red-100">Delete</button>
+            </div>
+          </div>
+        </template>
+      </div>
+    </div>
+
+    <!-- ===== RULES ===== -->
+    <div x-show="activeTab === 'rules'">
+      <div class="flex items-center justify-between mb-4">
+        <h2 class="text-lg font-semibold">Bonus Rules</h2>
+        <button @click="openRuleForm(null)" class="text-xs bg-violet-600 text-white px-3 py-1.5 rounded-lg hover:bg-violet-700">
+          + Add Rule
+        </button>
+      </div>
+      <div class="grid gap-3">
+        <template x-for="rule in rules" :key="rule.id">
+          <div class="bg-white rounded-xl shadow-sm border p-4">
+            <div class="flex items-start justify-between">
+              <div>
+                <div class="flex items-center gap-2 mb-1">
+                  <p class="font-semibold" x-text="rule.name"></p>
+                  <span :class="rule.active ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-500'"
+                    class="text-xs px-2 py-0.5 rounded-full" x-text="rule.active ? 'Active' : 'Inactive'"></span>
+                </div>
+                <p class="text-xs text-gray-400" x-text="rule.description"></p>
+                <p class="text-xs text-gray-500 mt-1">
+                  Type: <span x-text="rule.type" class="font-medium"></span>
+                  <span x-show="rule.extra_points"> · +<span x-text="rule.extra_points"></span> points</span>
+                  <span x-show="rule.multiplier && rule.multiplier !== 1"> · ×<span x-text="rule.multiplier"></span></span>
+                  <span x-show="rule.valid_from || rule.valid_until">
+                    · Valid <span x-text="rule.valid_from ? new Date(rule.valid_from).toLocaleDateString() : '∞'"></span>
+                    – <span x-text="rule.valid_until ? new Date(rule.valid_until).toLocaleDateString() : '∞'"></span>
+                  </span>
+                </p>
+                <pre x-show="rule.config && Object.keys(rule.config).length"
+                  class="text-xs bg-gray-50 rounded p-2 mt-1 text-gray-500"
+                  x-text="JSON.stringify(rule.config, null, 2)"></pre>
+              </div>
+              <div class="flex gap-2 ml-4 shrink-0">
+                <button @click="toggleRule(rule)" class="text-xs bg-gray-100 px-2 py-1 rounded hover:bg-gray-200"
+                  x-text="rule.active ? 'Disable' : 'Enable'"></button>
+                <button @click="openRuleForm(rule)" class="text-xs bg-gray-100 px-2 py-1 rounded hover:bg-gray-200">Edit</button>
+                <button @click="deleteRule(rule.id)" class="text-xs bg-red-50 text-red-600 px-2 py-1 rounded hover:bg-red-100">Del</button>
+              </div>
+            </div>
+          </div>
+        </template>
+        <p x-show="!rules.length" class="text-center text-gray-400 text-sm py-8">No bonus rules yet</p>
+      </div>
+    </div>
+
+    <!-- ===== SETTINGS ===== -->
+    <div x-show="activeTab === 'settings'">
+      <h2 class="text-lg font-semibold mb-4">Settings</h2>
+      <div class="bg-white rounded-xl shadow-sm border p-6 max-w-lg">
+        <div class="space-y-4">
+          <div>
+            <label class="block text-sm font-medium mb-1">Store Name</label>
+            <input x-model="settings.store_name" type="text"
+              class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-violet-300" />
+          </div>
+          <div>
+            <label class="block text-sm font-medium mb-1">Points per €1 spent</label>
+            <input x-model.number="settings.points_per_eur" type="number" min="1" step="1"
+              class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-violet-300" />
+            <p class="text-xs text-gray-400 mt-1">Default: 2 → spend €500 = 1,000 points</p>
+          </div>
+          <div>
+            <label class="block text-sm font-medium mb-1">Points needed for €1 discount</label>
+            <input x-model.number="settings.points_to_eur_rate" type="number" min="1" step="1"
+              class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-violet-300" />
+            <p class="text-xs text-gray-400 mt-1">Default: 100 → 1,000 points = €10 discount</p>
+          </div>
+          <div>
+            <label class="block text-sm font-medium mb-1">Minimum order (€) to earn points</label>
+            <input x-model.number="settings.min_order_eur" type="number" min="0" step="1"
+              class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-violet-300" />
+          </div>
+          <div>
+            <label class="block text-sm font-medium mb-1">Trigger on order status</label>
+            <select x-model="settings.trigger_status"
+              class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-violet-300">
+              <option value="paid">paid</option>
+              <option value="completed">completed</option>
+              <option value="fulfilled">fulfilled</option>
+            </select>
+          </div>
+          <div>
+            <label class="block text-sm font-medium mb-1">Promo code prefix</label>
+            <input x-model="settings.promo_code_prefix" type="text" maxlength="8"
+              class="w-full border rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-violet-300" />
+            <p class="text-xs text-gray-400 mt-1">Alphanumeric only. Customer #3 → <span x-text="settings.promo_code_prefix + '3'" class="font-mono"></span></p>
+          </div>
+          <button @click="saveSettings()" class="w-full bg-violet-600 text-white py-2 rounded-lg hover:bg-violet-700 text-sm font-medium">
+            Save Settings
+          </button>
+        </div>
+      </div>
+    </div>
+
+  </main><!-- /main -->
+
+  <!-- ===== MODAL: Adjust Points ===== -->
+  <div x-show="modal.open" x-transition class="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
+    <div class="bg-white rounded-2xl shadow-xl p-6 w-full max-w-sm" @click.stop>
+      <h3 class="font-semibold text-lg mb-1">Adjust Points</h3>
+      <p class="text-sm text-gray-400 mb-4" x-text="modal.customer?.email"></p>
+
+      <div class="mb-3">
+        <label class="text-xs font-medium text-gray-600 block mb-1">Current balance</label>
+        <p class="text-2xl font-bold text-violet-600" x-text="(modal.customer?.points_balance ?? 0).toLocaleString() + ' pts'"></p>
+      </div>
+
+      <div class="mb-3">
+        <label class="text-xs font-medium text-gray-600 block mb-1">Points to add / remove (use negative to deduct)</label>
+        <input x-model.number="modal.points" type="number"
+          class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-violet-300"
+          placeholder="e.g. 500 or -200" />
+      </div>
+      <div class="mb-4">
+        <label class="text-xs font-medium text-gray-600 block mb-1">Reason</label>
+        <input x-model="modal.description" type="text"
+          class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-violet-300"
+          placeholder="e.g. Birthday bonus" />
+      </div>
+
+      <div class="flex gap-2">
+        <button @click="modal.open = false" class="flex-1 border py-2 rounded-lg text-sm hover:bg-gray-50">Cancel</button>
+        <button @click="submitAdjust()" class="flex-1 bg-violet-600 text-white py-2 rounded-lg text-sm hover:bg-violet-700">
+          Apply
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== MODAL: Tier Form ===== -->
+  <div x-show="tierModal.open" x-transition class="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
+    <div class="bg-white rounded-2xl shadow-xl p-6 w-full max-w-sm" @click.stop>
+      <h3 class="font-semibold text-lg mb-4" x-text="tierModal.editing ? 'Edit Tier' : 'New Tier'"></h3>
+      <div class="space-y-3">
+        <div>
+          <label class="text-xs font-medium text-gray-600 block mb-1">Name</label>
+          <input x-model="tierModal.form.name" type="text"
+            class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-violet-300" />
+        </div>
+        <div>
+          <label class="text-xs font-medium text-gray-600 block mb-1">Min Points to Reach This Tier</label>
+          <input x-model.number="tierModal.form.min_points" type="number"
+            class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-violet-300" />
+        </div>
+        <div>
+          <label class="text-xs font-medium text-gray-600 block mb-1">Sort Order</label>
+          <input x-model.number="tierModal.form.sort_order" type="number"
+            class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-violet-300" />
+        </div>
+      </div>
+      <div class="flex gap-2 mt-4">
+        <button @click="tierModal.open = false" class="flex-1 border py-2 rounded-lg text-sm">Cancel</button>
+        <button @click="saveTier()" class="flex-1 bg-violet-600 text-white py-2 rounded-lg text-sm">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== MODAL: Rule Form ===== -->
+  <div x-show="ruleModal.open" x-transition class="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
+    <div class="bg-white rounded-2xl shadow-xl p-6 w-full max-w-md overflow-y-auto max-h-screen" @click.stop>
+      <h3 class="font-semibold text-lg mb-4" x-text="ruleModal.editing ? 'Edit Rule' : 'New Bonus Rule'"></h3>
+      <div class="space-y-3">
+        <div>
+          <label class="text-xs font-medium text-gray-600 block mb-1">Name</label>
+          <input x-model="ruleModal.form.name" type="text"
+            class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-violet-300" />
+        </div>
+        <div>
+          <label class="text-xs font-medium text-gray-600 block mb-1">Description</label>
+          <input x-model="ruleModal.form.description" type="text"
+            class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-violet-300" />
+        </div>
+        <div>
+          <label class="text-xs font-medium text-gray-600 block mb-1">Type</label>
+          <select x-model="ruleModal.form.type"
+            class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-violet-300">
+            <option value="product_ids">Specific Products (by ID)</option>
+            <option value="minimum_order">Minimum Order Value</option>
+            <option value="multiplier">Points Multiplier</option>
+            <option value="flat_bonus">Flat Bonus (all orders)</option>
+          </select>
+        </div>
+        <div x-show="ruleModal.form.type === 'product_ids'">
+          <label class="text-xs font-medium text-gray-600 block mb-1">Product IDs (comma-separated)</label>
+          <input x-model="ruleModal.productIds" type="text" placeholder="123, 456, 789"
+            class="w-full border rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-violet-300" />
+        </div>
+        <div x-show="ruleModal.form.type === 'minimum_order'">
+          <label class="text-xs font-medium text-gray-600 block mb-1">Minimum Order (€)</label>
+          <input x-model.number="ruleModal.minOrderEur" type="number"
+            class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-violet-300" />
+        </div>
+        <div x-show="ruleModal.form.type === 'multiplier'">
+          <label class="text-xs font-medium text-gray-600 block mb-1">Multiplier (e.g. 2 = double points)</label>
+          <input x-model.number="ruleModal.form.multiplier" type="number" step="0.1" min="1"
+            class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-violet-300" />
+        </div>
+        <div x-show="ruleModal.form.type !== 'multiplier'">
+          <label class="text-xs font-medium text-gray-600 block mb-1">Extra Points</label>
+          <input x-model.number="ruleModal.form.extra_points" type="number"
+            class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-violet-300" />
+        </div>
+        <div class="grid grid-cols-2 gap-2">
+          <div>
+            <label class="text-xs font-medium text-gray-600 block mb-1">Valid From</label>
+            <input x-model="ruleModal.form.valid_from" type="date"
+              class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-violet-300" />
+          </div>
+          <div>
+            <label class="text-xs font-medium text-gray-600 block mb-1">Valid Until</label>
+            <input x-model="ruleModal.form.valid_until" type="date"
+              class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-violet-300" />
+          </div>
+        </div>
+        <label class="flex items-center gap-2 text-sm">
+          <input type="checkbox" x-model="ruleModal.form.active" class="rounded" />
+          Active
+        </label>
+      </div>
+      <div class="flex gap-2 mt-4">
+        <button @click="ruleModal.open = false" class="flex-1 border py-2 rounded-lg text-sm">Cancel</button>
+        <button @click="saveRule()" class="flex-1 bg-violet-600 text-white py-2 rounded-lg text-sm">Save</button>
+      </div>
+    </div>
+  </div>
+
+</div><!-- /app -->
+
+<script>
+function app() {
+  return {
+    activeTab: 'overview',
+    tabs: [
+      { id: 'overview', label: '📊 Overview' },
+      { id: 'customers', label: '👥 Customers' },
+      { id: 'transactions', label: '📋 Transactions' },
+      { id: 'tiers', label: '🏅 Tiers' },
+      { id: 'rules', label: '⚡ Bonus Rules' },
+      { id: 'settings', label: '⚙️ Settings' },
+    ],
+    stats: {},
+    customers: { data: [], total: 0, page: 1, size: 20 },
+    transactions: { data: [], total: 0, page: 1, size: 30 },
+    tiers: [],
+    rules: [],
+    settings: {},
+    customerSearch: '',
+    toast: { msg: '', type: 'success' },
+    modal: { open: false, customer: null, points: 0, description: '' },
+    tierModal: { open: false, editing: false, form: {} },
+    ruleModal: { open: false, editing: false, form: {}, productIds: '', minOrderEur: 0 },
+
+    async init() {
+      await Promise.all([
+        this.loadStats(),
+        this.loadSettings(),
+        this.loadCustomers(1),
+        this.loadTransactions(1),
+        this.loadTiers(),
+        this.loadRules(),
+      ]);
+    },
+
+    notify(msg, type = 'success') {
+      this.toast = { msg, type };
+      setTimeout(() => this.toast.msg = '', 3500);
+    },
+
+    async api(method, path, body) {
+      const res = await fetch('/api/admin' + path, {
+        method,
+        headers: { 'Content-Type': 'application/json' },
+        body: body ? JSON.stringify(body) : undefined,
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? 'API error');
+      return data;
+    },
+
+    async loadStats() {
+      this.stats = await this.api('GET', '/stats');
+    },
+    async loadSettings() {
+      this.settings = await this.api('GET', '/settings');
+    },
+    async loadCustomers(page = 1) {
+      const q = new URLSearchParams({ page, size: 20, search: this.customerSearch });
+      const r = await this.api('GET', '/customers?' + q);
+      this.customers = r;
+    },
+    async loadTransactions(page = 1) {
+      const r = await this.api('GET', '/transactions?page=' + page + '&size=30');
+      this.transactions = r;
+    },
+    async loadTiers() {
+      this.tiers = await this.api('GET', '/tiers');
+    },
+    async loadRules() {
+      this.rules = await this.api('GET', '/rules');
+    },
+
+    async saveSettings() {
+      try {
+        await this.api('PATCH', '/settings', this.settings);
+        this.notify('Settings saved ✓');
+      } catch (e) { this.notify(e.message, 'error'); }
+    },
+
+    openAdjust(cust) {
+      this.modal = { open: true, customer: cust, points: 0, description: '' };
+    },
+    async submitAdjust() {
+      try {
+        const r = await this.api('POST', '/customers/' + this.modal.customer.id + '/adjust', {
+          points: this.modal.points,
+          description: this.modal.description,
+        });
+        this.notify('Balance updated → ' + r.new_balance + ' pts');
+        this.modal.open = false;
+        await Promise.all([this.loadCustomers(this.customers.page), this.loadStats()]);
+      } catch (e) { this.notify(e.message, 'error'); }
+    },
+    async syncCustomer(cust) {
+      try {
+        await this.api('POST', '/customers/' + cust.id + '/sync');
+        this.notify('Synced to CloudCart ✓');
+      } catch (e) { this.notify(e.message, 'error'); }
+    },
+
+    openTierForm(tier) {
+      this.tierModal = {
+        open: true,
+        editing: !!tier,
+        form: tier ? { ...tier } : { name: '', min_points: 0, sort_order: 0 },
+      };
+    },
+    async saveTier() {
+      try {
+        if (this.tierModal.editing) {
+          await this.api('PATCH', '/tiers/' + this.tierModal.form.id, this.tierModal.form);
+        } else {
+          await this.api('POST', '/tiers', this.tierModal.form);
+        }
+        this.notify('Tier saved ✓');
+        this.tierModal.open = false;
+        await this.loadTiers();
+      } catch (e) { this.notify(e.message, 'error'); }
+    },
+    async deleteTier(id) {
+      if (!confirm('Delete this tier?')) return;
+      try {
+        await this.api('DELETE', '/tiers/' + id);
+        this.notify('Deleted');
+        await this.loadTiers();
+      } catch (e) { this.notify(e.message, 'error'); }
+    },
+
+    openRuleForm(rule) {
+      this.ruleModal = {
+        open: true,
+        editing: !!rule,
+        productIds: rule?.config?.product_ids?.join(', ') ?? '',
+        minOrderEur: rule?.config?.min_order_eur ?? 0,
+        form: rule ? { ...rule } : {
+          name: '', description: '', type: 'flat_bonus',
+          extra_points: 0, multiplier: 1, active: true,
+          valid_from: null, valid_until: null, config: {},
+        },
+      };
+    },
+    async saveRule() {
+      const form = { ...this.ruleModal.form };
+      if (form.type === 'product_ids') {
+        form.config = {
+          product_ids: this.ruleModal.productIds.split(',').map(s => Number(s.trim())).filter(Boolean),
+        };
+      } else if (form.type === 'minimum_order') {
+        form.config = { min_order_eur: this.ruleModal.minOrderEur };
+      } else {
+        form.config = {};
+      }
+      try {
+        if (this.ruleModal.editing) {
+          await this.api('PATCH', '/rules/' + form.id, form);
+        } else {
+          await this.api('POST', '/rules', form);
+        }
+        this.notify('Rule saved ✓');
+        this.ruleModal.open = false;
+        await this.loadRules();
+      } catch (e) { this.notify(e.message, 'error'); }
+    },
+    async toggleRule(rule) {
+      try {
+        await this.api('PATCH', '/rules/' + rule.id, { active: !rule.active });
+        await this.loadRules();
+      } catch (e) { this.notify(e.message, 'error'); }
+    },
+    async deleteRule(id) {
+      if (!confirm('Delete this rule?')) return;
+      try {
+        await this.api('DELETE', '/rules/' + id);
+        await this.loadRules();
+      } catch (e) { this.notify(e.message, 'error'); }
+    },
+
+    async runSetup() {
+      try {
+        const r = await fetch('/api/setup', { method: 'POST' });
+        const data = await r.json();
+        alert(data.log.join('\\n') + (data.errors.length ? '\\n\\nErrors:\\n' + data.errors.join('\\n') : ''));
+        await this.loadTiers();
+      } catch (e) { this.notify(e.message, 'error'); }
+    },
+    async syncExisting() {
+      if (!confirm('Import all CloudCart customers into loyalty DB?')) return;
+      try {
+        const r = await fetch('/api/setup/sync-existing', { method: 'POST' });
+        const data = await r.json();
+        this.notify('Imported ' + data.imported + ' customers');
+        await this.loadCustomers(1);
+        await this.loadStats();
+      } catch (e) { this.notify(e.message, 'error'); }
+    },
+  };
+}
+</script>
+</body>
+</html>`;

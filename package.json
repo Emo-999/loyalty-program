@@ -1,0 +1,19 @@
+{
+  "name": "loyalty-program",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "cf-typegen": "wrangler types"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.49.2",
+    "hono": "^4.7.4"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250311.0",
+    "typescript": "^5.8.2",
+    "wrangler": "^3.113.0"
+  }
+}

@@ -13,7 +13,7 @@ export const loginHtml = /* html */ `<!DOCTYPE html>
 </head>
 <body class="bg-gradient-to-br from-violet-50 to-indigo-100 min-h-screen flex items-center justify-center">
 
-<div x-data="{ slug: '', password: '', error: '', loading: false }" x-cloak class="w-full max-w-sm">
+<div x-data="loginForm()" x-cloak class="w-full max-w-sm">
   <div class="bg-white rounded-2xl shadow-xl p-8">
     <div class="text-center mb-6">
       <span class="text-4xl">🎯</span>
@@ -45,27 +45,35 @@ export const loginHtml = /* html */ `<!DOCTYPE html>
 </div>
 
 <script>
-function login() {
-  const el = document.querySelector('[x-data]').__x.$data;
-  el.error = '';
-  el.loading = true;
-  fetch('/api/login', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ slug: el.slug.trim().toLowerCase(), password: el.password }),
-  })
-    .then(r => r.json())
-    .then(data => {
-      el.loading = false;
-      if (data.ok) {
-        localStorage.setItem('loyalty_token', data.token);
-        localStorage.setItem('loyalty_slug', el.slug.trim().toLowerCase());
-        window.location.href = '/admin/' + el.slug.trim().toLowerCase();
-      } else {
-        el.error = data.error || 'Login failed';
-      }
-    })
-    .catch(() => { el.loading = false; el.error = 'Network error'; });
+function loginForm() {
+  return {
+    slug: '',
+    password: '',
+    error: '',
+    loading: false,
+    login() {
+      this.error = '';
+      this.loading = true;
+      const s = this.slug.trim().toLowerCase();
+      fetch('/api/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ slug: s, password: this.password }),
+      })
+        .then(r => r.json())
+        .then(data => {
+          this.loading = false;
+          if (data.ok) {
+            localStorage.setItem('loyalty_token', data.token);
+            localStorage.setItem('loyalty_slug', s);
+            window.location.href = '/admin/' + s;
+          } else {
+            this.error = data.error || 'Login failed';
+          }
+        })
+        .catch(() => { this.loading = false; this.error = 'Network error'; });
+    },
+  };
 }
 </script>
 </body>

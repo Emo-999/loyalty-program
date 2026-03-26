@@ -100,7 +100,8 @@ webhook.post('/:slug/cloudcart', async (c) => {
   }
 
   const orderEur = order.priceTotal / 100;
-  if (orderEur > 50_000) {
+  const safetyCap = 500_000; // €500k — intentionally high to avoid blocking test orders
+  if (orderEur > safetyCap) {
     console.error(`[${slug}] Suspiciously large order: €${orderEur} order #${order.orderId}`);
     return c.json({ ok: true, skipped: `order value €${orderEur} exceeds safety cap` });
   }

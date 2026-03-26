@@ -25,7 +25,9 @@ export class CloudCartClient {
   ) {}
 
   static forMerchant(merchant: DbMerchant): CloudCartClient {
-    return new CloudCartClient(merchant.cloudcart_api_key, merchant.cloudcart_base_url);
+    let base = merchant.cloudcart_base_url.replace(/\/+$/, '');
+    if (!base.endsWith('/api/v2')) base += '/api/v2';
+    return new CloudCartClient(merchant.cloudcart_api_key, base);
   }
 
   private async req<T>(

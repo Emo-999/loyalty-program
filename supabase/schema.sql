@@ -3,13 +3,24 @@
 -- Run this in your Supabase SQL editor (replaces previous schema)
 -- ============================================================
 
--- Enable pgcrypto for password hashing
+-- Drop old tables (CASCADE removes triggers + dependencies)
+DROP TABLE IF EXISTS webhook_logs CASCADE;
+DROP TABLE IF EXISTS processed_orders CASCADE;
+DROP TABLE IF EXISTS bonus_rules CASCADE;
+DROP TABLE IF EXISTS points_transactions CASCADE;
+DROP TABLE IF EXISTS loyalty_customers CASCADE;
+DROP TABLE IF EXISTS reward_types CASCADE;
+DROP TABLE IF EXISTS tiers CASCADE;
+DROP TABLE IF EXISTS settings CASCADE;
+DROP TABLE IF EXISTS merchants CASCADE;
+DROP FUNCTION IF EXISTS insert_default_settings() CASCADE;
+
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
 -- ============================================================
 -- Merchants (one row per CloudCart store)
 -- ============================================================
-CREATE TABLE IF NOT EXISTS merchants (
+CREATE TABLE merchants (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   slug TEXT UNIQUE NOT NULL,              -- URL-safe identifier, e.g. "smokezone"
   store_name TEXT NOT NULL,
@@ -189,7 +200,6 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
-DROP TRIGGER IF EXISTS trg_merchant_defaults ON merchants;
 CREATE TRIGGER trg_merchant_defaults
   AFTER INSERT ON merchants
   FOR EACH ROW EXECUTE FUNCTION insert_default_settings();

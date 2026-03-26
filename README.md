@@ -77,18 +77,20 @@ src/
 ├── index.ts              # Entry point — auth middleware, routing, super-admin API
 ├── types.ts              # TypeScript types (multi-tenant)
 ├── lib/
-│   ├── cloudcart.ts      # CloudCart API v2 client (per-merchant)
+│   ├── cloudcart.ts      # CloudCart API v2 client (per-merchant, auto-appends /api/v2)
 │   ├── supabase.ts       # Supabase client + merchant/settings loaders
 │   └── points.ts         # Points engine, reward conditions, promo code sync
 ├── routes/
 │   ├── webhook.ts        # POST /webhook/:slug/cloudcart
 │   ├── admin.ts          # /api/m/:slug/admin/* — merchant-scoped CRUD
-│   └── setup.ts          # /api/m/:slug/setup — per-merchant setup wizard
+│   ├── setup.ts          # /api/m/:slug/setup — per-merchant setup wizard
+│   └── customer.ts       # /c/:slug/* — public customer-facing API + pages
 └── ui/
-    └── dashboard.ts      # Login page + merchant admin SPA
+    ├── dashboard.ts      # Login page + merchant admin SPA (Alpine.js v3)
+    └── customer.ts       # Customer loyalty page + embeddable widget
 
 supabase/
-├── schema.sql            # Multi-tenant schema with triggers
+├── schema.sql            # Multi-tenant schema (drop + recreate, with triggers)
 └── functions.sql         # pgcrypto password hashing functions
 ```
 
@@ -144,7 +146,7 @@ curl -X POST https://loyalty-program.YOUR.workers.dev/api/super/merchants \
   -d '{
     "slug": "smokezone",
     "store_name": "Smokezone",
-    "cloudcart_base_url": "https://smokezone.cloudcart.net/api/v2",
+    "cloudcart_base_url": "https://smokezone.cloudcart.net",
     "cloudcart_api_key": "YOUR_CLOUDCART_KEY",
     "admin_email": "admin@smokezone.com",
     "admin_password": "secure-password"
@@ -172,6 +174,15 @@ curl -X POST https://loyalty-program.YOUR.workers.dev/api/super/merchants \
 | `GET` | `/admin` | Login page |
 | `GET` | `/admin/:slug` | Merchant dashboard |
 
+### Customer-Facing (public, HMAC token auth via query params)
+
+| Method | Endpoint | Description |
+|---|---|---|
+| `GET` | `/c/:slug/api/me?email=X&token=Y` | Customer loyalty data (JSON) |
+| `GET` | `/c/:slug/page?email=X&token=Y` | Full loyalty page (BestSecret-style) |
+| `GET` | `/c/:slug/widget?email=X&token=Y` | Compact embeddable widget |
+| `GET` | `/c/:slug/console.js` | Chrome console injection script |
+
 ### Merchant API (Bearer token required)
 
 | Method | Endpoint | Description |
@@ -198,3 +209,20 @@ curl -X POST https://loyalty-program.YOUR.workers.dev/api/super/merchants \
 |---|---|---|
 | `POST` | `/api/super/merchants` | Onboard new merchant |
 | `GET` | `/api/super/merchants` | List all merchants |
+
+---
+
+## Live Deployment
+
+| Resource | URL |
+|---|---|
+| Worker | `https://loyalty-program.e-kurtisi.workers.dev` |
+| Admin login | `https://loyalty-program.e-kurtisi.workers.dev/admin` |
+| Smokezone dashboard | `https://loyalty-program.e-kurtisi.workers.dev/admin/smokezone` |
+| Smokezone webhook | `https://loyalty-program.e-kurtisi.workers.dev/webhook/smokezone/cloudcart` |
+
+### Key Notes
+- **CloudCart base URL**: Just the domain (e.g. `https://smokezone.cloudcart.net`). The code auto-appends `/api/v2`.
+- **Alpine.js**: v3 is used for the dashboard (login uses `x-data` component pattern, not the v2 `__x.$data` API).
+- **Schema migration**: `schema.sql` drops all tables with CASCADE before recreating — safe to re-run but destructive.
+- **Safety cap**: Webhook ignores orders over €500,000 as a fraud safeguard.

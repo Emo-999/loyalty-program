@@ -53,12 +53,14 @@ curl -X POST https://loyalty-program.YOUR.workers.dev/api/super/merchants \
   -d '{
     "slug": "mystore",
     "store_name": "My Store",
-    "cloudcart_base_url": "https://mystore.cloudcart.net/api/v2",
+    "cloudcart_base_url": "https://mystore.cloudcart.net",
     "cloudcart_api_key": "STORE_API_KEY",
     "admin_email": "admin@mystore.com",
     "admin_password": "secure-password"
   }'
 ```
+
+The `cloudcart_base_url` should be the store domain (e.g. `https://mystore.cloudcart.net`). The system auto-appends `/api/v2` if missing.
 
 This automatically:
 - Creates the merchant record

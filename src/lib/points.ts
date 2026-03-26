@@ -1,12 +1,19 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
-import type { DbSettings, DbTier, DbBonusRule, DbCustomer } from '../types';
+import type {
+  DbSettings,
+  DbTier,
+  DbBonusRule,
+  DbCustomer,
+  DbMerchant,
+  DbRewardType,
+  CCProCondition,
+} from '../types';
 import { CloudCartClient } from './cloudcart';
 
 // ============================================================
 // Points calculation
 // ============================================================
 
-/** Calculate points earned for an order, applying all active bonus rules. */
 export function calculatePointsForOrder(
   orderValueCents: number,
   settings: DbSettings,
@@ -17,9 +24,7 @@ export function calculatePointsForOrder(
 
   if (orderEur < settings.min_order_eur) return 0;
 
-  // Base points
   let points = Math.floor(orderEur * settings.points_per_eur);
-
   const now = new Date();
 
   for (const rule of bonusRules) {
@@ -53,12 +58,10 @@ export function calculatePointsForOrder(
   return Math.max(0, points);
 }
 
-/** Convert points balance to EUR discount value (for promo code). */
 export function pointsToEur(points: number, rate: number): number {
-  return Math.floor(points / rate); // floor to whole EUR
+  return Math.floor(points / rate);
 }
 
-/** Find the highest tier a customer qualifies for based on points. */
 export function getTierForPoints(
   points: number,
   tiers: DbTier[],
@@ -67,7 +70,6 @@ export function getTierForPoints(
   return sorted.find((t) => points >= t.min_points) ?? null;
 }
 
-/** Build the note string stored on the CloudCart customer profile. Visible in admin. */
 export function buildCustomerNote(
   points: number,
   tier: DbTier | null,
@@ -82,6 +84,37 @@ export function buildCustomerNote(
     `Tier: ${tierLabel}\n` +
     `Promo code: ${codeLabel} (€${promoValueEur} discount)`
   );
+}
+
+// ============================================================
+// Build CloudCart pro-code conditions from a reward type
+// ============================================================
+
+export function buildConditionsForReward(
+  reward: DbRewardType,
+  valueCentsOverride?: number,
+): CCProCondition[] {
+  const value = valueCentsOverride ?? reward.discount_value;
+  const condition: CCProCondition = {
+    type: reward.discount_method,
+    setting: reward.discount_target,
+    value,
+  };
+
+  if (reward.discount_target === 'order_over' && reward.order_over_cents) {
+    condition.order_over = reward.order_over_cents;
+  }
+  if (reward.discount_target === 'product' && reward.product_ids?.length) {
+    condition.product = reward.product_ids;
+  }
+  if (reward.discount_target === 'category' && reward.category_ids?.length) {
+    condition.category = reward.category_ids;
+  }
+  if (reward.discount_target === 'vendor' && reward.vendor_ids?.length) {
+    condition.vendor = reward.vendor_ids;
+  }
+
+  return [condition];
 }
 
 // ============================================================
@@ -102,7 +135,6 @@ export async function syncCustomerToCloudCart(
     promoValueEur,
   );
 
-  // Update CloudCart customer: note + group_id (tier)
   const attrs: Partial<{ note: string; group_id: number }> = { note };
   if (tier?.cloudcart_group_id) attrs.group_id = tier.cloudcart_group_id;
 
@@ -113,43 +145,38 @@ export async function syncCustomerToCloudCart(
 // Promo code management (discount-codes-pro)
 // ============================================================
 
-/**
- * Ensure the customer has a personal loyalty pro code on CloudCart.
- *
- * Uses the discount-codes-pro API:
- * - Creates a flat discount on all products equal to the points value
- * - only_customer: 1  → must be logged in (prevents code sharing)
- * - maxused_user: 1   → single use; the `uses` counter is our redemption detector
- *
- * On update: deletes the old code and creates a fresh one (resets the uses counter).
- * This is necessary because we can't reset `uses` via PATCH.
- */
 export async function upsertPromoCode(
   cc: CloudCartClient,
   db: SupabaseClient,
   customer: DbCustomer,
-  newValueCents: number,   // EUR cents (e.g. 1000 = €10)
+  valueCents: number,
   prefix: string,
   containerId: number,
+  rewardTypes: DbRewardType[],
 ): Promise<{ ccId: number; code: string }> {
   const expectedCode = `${prefix}${customer.cloudcart_id}`;
 
-  // If we already have a CloudCart pro code ID, delete it and recreate
-  // (we must recreate to reset the uses counter after a redemption)
   if (customer.promo_code_cloudcart_id) {
     try {
       await cc.deleteProCode(customer.promo_code_cloudcart_id);
     } catch {
-      // Already gone — continue to create
+      // Already gone
     }
   }
 
-  // Create fresh pro code with new value
+  const autoReward = rewardTypes.find((r) => r.auto_apply && r.active);
+  let conditions: CCProCondition[];
+  if (autoReward) {
+    conditions = buildConditionsForReward(autoReward, valueCents);
+  } else {
+    conditions = [{ type: 'flat', setting: 'all', value: valueCents }];
+  }
+
   const created = await cc.createProCode({
     containerId,
     code: expectedCode,
     name: `Loyalty points — ${customer.email}`,
-    valueCents: newValueCents,
+    conditions,
   });
   const ccId = Number(created.id);
 
@@ -165,17 +192,14 @@ export async function upsertPromoCode(
   return { ccId, code: expectedCode };
 }
 
-/**
- * Check if a customer's loyalty pro code has been redeemed (uses > 0).
- * If so, record the redemption in Supabase and return the points deducted.
- */
 export async function detectAndRecordRedemption(params: {
   cc: CloudCartClient;
   db: SupabaseClient;
   customer: DbCustomer;
   settings: DbSettings;
+  merchantId: string;
 }): Promise<number> {
-  const { cc, db, customer, settings } = params;
+  const { cc, db, customer, settings, merchantId } = params;
 
   if (!customer.promo_code_cloudcart_id) return 0;
 
@@ -183,19 +207,17 @@ export async function detectAndRecordRedemption(params: {
   try {
     proCode = await cc.getProCode(customer.promo_code_cloudcart_id);
   } catch {
-    return 0; // code gone — nothing to detect
+    return 0;
   }
 
   if (proCode.attributes.uses === 0) return 0;
 
-  // Code was used — calculate how many points were redeemed
-  // The redeemed value was the condition value at time of use (cents → EUR → points)
   const redeemedCents = proCode.attributes.conditions?.[0]?.value ?? 0;
   const redeemedEur = redeemedCents / 100;
   const pointsRedeemed = Math.round(redeemedEur * settings.points_to_eur_rate);
 
-  // Record the redemption transaction
   await db.from('points_transactions').insert({
+    merchant_id: merchantId,
     customer_id: customer.id,
     type: 'redeem',
     points: -pointsRedeemed,
@@ -212,9 +234,11 @@ export async function detectAndRecordRedemption(params: {
 export async function awardPoints(params: {
   db: SupabaseClient;
   cc: CloudCartClient;
+  merchant: DbMerchant;
   settings: DbSettings;
   tiers: DbTier[];
   bonusRules: DbBonusRule[];
+  rewardTypes: DbRewardType[];
   cloudcartOrderId: number;
   cloudcartCustomerId: number;
   orderValueCents: number;
@@ -223,23 +247,18 @@ export async function awardPoints(params: {
   customerLastName: string;
 }): Promise<{ points: number; newBalance: number }> {
   const {
-    db,
-    cc,
-    settings,
-    tiers,
-    bonusRules,
-    cloudcartOrderId,
-    cloudcartCustomerId,
-    orderValueCents,
-    customerEmail,
-    customerFirstName,
-    customerLastName,
+    db, cc, merchant, settings, tiers, bonusRules, rewardTypes,
+    cloudcartOrderId, cloudcartCustomerId, orderValueCents,
+    customerEmail, customerFirstName, customerLastName,
   } = params;
+
+  const merchantId = merchant.id;
 
   // Idempotency check
   const { data: existing } = await db
     .from('processed_orders')
     .select('cloudcart_order_id')
+    .eq('merchant_id', merchantId)
     .eq('cloudcart_order_id', cloudcartOrderId)
     .maybeSingle();
 
@@ -247,10 +266,11 @@ export async function awardPoints(params: {
     return { points: 0, newBalance: 0 };
   }
 
-  // Upsert customer in our DB first (needed for redemption check)
+  // Upsert customer
   const { data: existingCustomer } = await db
     .from('loyalty_customers')
     .select('*, tiers(*)')
+    .eq('merchant_id', merchantId)
     .eq('cloudcart_id', cloudcartCustomerId)
     .maybeSingle();
 
@@ -261,11 +281,13 @@ export async function awardPoints(params: {
     const { data: created, error } = await db
       .from('loyalty_customers')
       .insert({
+        merchant_id: merchantId,
         cloudcart_id: cloudcartCustomerId,
         email: customerEmail,
         first_name: customerFirstName,
         last_name: customerLastName,
         points_balance: 0,
+        lifetime_points: 0,
       })
       .select('*, tiers(*)')
       .single();
@@ -273,22 +295,23 @@ export async function awardPoints(params: {
     customer = created;
   }
 
-  // ---- Redemption detection ----
-  // Check if the customer's pro code was used since last update.
-  // If uses > 0, they redeemed their points on a previous order.
-  const pointsRedeemed = await detectAndRecordRedemption({ cc, db, customer, settings });
+  // Redemption detection
+  const pointsRedeemed = await detectAndRecordRedemption({
+    cc, db, customer, settings, merchantId,
+  });
   const balanceAfterRedemption = Math.max(0, customer.points_balance - pointsRedeemed);
 
-  // ---- Calculate points for this order ----
+  // Calculate points for this order
   const points = calculatePointsForOrder(orderValueCents, settings, bonusRules);
   const newBalance = balanceAfterRedemption + points;
+  const newLifetime = (customer.lifetime_points ?? 0) + points;
   const newTier = getTierForPoints(newBalance, tiers);
 
-  // Update customer balance + tier in Supabase
   const { error: updateErr } = await db
     .from('loyalty_customers')
     .update({
       points_balance: newBalance,
+      lifetime_points: newLifetime,
       tier_id: newTier?.id ?? null,
       email: customerEmail,
       first_name: customerFirstName,
@@ -300,6 +323,7 @@ export async function awardPoints(params: {
 
   if (points > 0) {
     await db.from('points_transactions').insert({
+      merchant_id: merchantId,
       customer_id: customer.id,
       cloudcart_order_id: cloudcartOrderId,
       type: 'earn',
@@ -310,33 +334,29 @@ export async function awardPoints(params: {
   }
 
   await db.from('processed_orders').insert({
+    merchant_id: merchantId,
     cloudcart_order_id: cloudcartOrderId,
     customer_id: customer.id,
     points_awarded: points,
   });
 
-  // ---- Sync promo code (pro) on CloudCart ----
-  // Always recreate to reset the uses counter
+  // Sync promo code on CloudCart
   const promoValueCents = pointsToEur(newBalance, settings.points_to_eur_rate) * 100;
   const freshCustomer = {
     ...customer,
     points_balance: newBalance,
+    lifetime_points: newLifetime,
     tier_id: newTier?.id ?? null,
   };
 
   let code = customer.promo_code ?? `${settings.promo_code_prefix}${cloudcartCustomerId}`;
 
-  if (settings.loyalty_container_id && promoValueCents > 0) {
+  if (merchant.loyalty_container_id && promoValueCents > 0) {
     const { ccId, code: newCode } = await upsertPromoCode(
-      cc,
-      db,
-      freshCustomer,
-      promoValueCents,
-      settings.promo_code_prefix,
-      settings.loyalty_container_id,
+      cc, db, freshCustomer, promoValueCents,
+      settings.promo_code_prefix, merchant.loyalty_container_id, rewardTypes,
     );
     code = newCode;
-    // Update the freshCustomer reference for the note
     freshCustomer.promo_code_cloudcart_id = ccId;
   }
 

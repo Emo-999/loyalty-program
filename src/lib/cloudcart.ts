@@ -7,6 +7,7 @@ import type {
   CCProCondition,
   CCDiscount,
   CCWebhook,
+  DbMerchant,
 } from '../types';
 
 interface JsonApiList<T> {
@@ -22,6 +23,10 @@ export class CloudCartClient {
     private readonly apiKey: string,
     private readonly baseUrl: string,
   ) {}
+
+  static forMerchant(merchant: DbMerchant): CloudCartClient {
+    return new CloudCartClient(merchant.cloudcart_api_key, merchant.cloudcart_base_url);
+  }
 
   private async req<T>(
     method: string,
@@ -43,7 +48,6 @@ export class CloudCartClient {
       throw new Error(`CloudCart ${method} ${path} → ${res.status}: ${text}`);
     }
 
-    // DELETE returns 204 no content
     if (res.status === 204) return undefined as T;
     return res.json() as Promise<T>;
   }
@@ -91,40 +95,28 @@ export class CloudCartClient {
   }
 
   // ----------------------------------------------------------
-  // Discount codes
+  // Discount codes (legacy simple codes)
   // ----------------------------------------------------------
   async getDiscountCode(id: number): Promise<CCDiscountCode> {
-    const r = await this.req<JsonApiSingle<CCDiscountCode>>(
-      'GET',
-      `/discount-codes/${id}`,
-    );
+    const r = await this.req<JsonApiSingle<CCDiscountCode>>('GET', `/discount-codes/${id}`);
     return r.data;
   }
 
   async listDiscountCodes(): Promise<CCDiscountCode[]> {
-    const r = await this.req<JsonApiList<CCDiscountCode>>(
-      'GET',
-      '/discount-codes',
-    );
+    const r = await this.req<JsonApiList<CCDiscountCode>>('GET', '/discount-codes');
     return r.data;
   }
 
-  /** Create personal loyalty promo code. Code must be alphanumeric. */
   async createDiscountCode(code: string, valueEur: number): Promise<CCDiscountCode> {
-    const r = await this.req<JsonApiSingle<CCDiscountCode>>(
-      'POST',
-      '/discount-codes',
-      {
-        data: {
-          type: 'discount-codes',
-          attributes: { code, value: valueEur, active: 1 },
-        },
+    const r = await this.req<JsonApiSingle<CCDiscountCode>>('POST', '/discount-codes', {
+      data: {
+        type: 'discount-codes',
+        attributes: { code, value: valueEur, active: 1 },
       },
-    );
+    });
     return r.data;
   }
 
-  /** Update the EUR value on an existing discount code. */
   async updateDiscountCode(id: number, valueEur: number): Promise<CCDiscountCode> {
     const r = await this.req<JsonApiSingle<CCDiscountCode>>(
       'PATCH',
@@ -163,7 +155,7 @@ export class CloudCartClient {
     const r = await this.req<JsonApiSingle<CCWebhook>>('POST', '/webhooks', {
       data: {
         type: 'webhooks',
-        attributes: { url, event, active: 1, request_headers: requestHeaders },
+        attributes: { url, event, active: 1, request_headers: requestHeaders, new_version: 1 },
       },
     });
     return r.data;
@@ -194,8 +186,6 @@ export class CloudCartClient {
   // ----------------------------------------------------------
   // Discount containers (code-pro type)
   // ----------------------------------------------------------
-
-  /** Create a discount container of type code-pro — one per store, holds all loyalty codes. */
   async createDiscountContainer(name: string): Promise<CCDiscount> {
     const r = await this.req<JsonApiSingle<CCDiscount>>('POST', '/discounts', {
       data: {
@@ -219,17 +209,11 @@ export class CloudCartClient {
   // ----------------------------------------------------------
   // Discount Codes Pro (individual loyalty codes)
   // ----------------------------------------------------------
-
-  /** Fetch a single pro code by its CloudCart ID. */
   async getProCode(id: number): Promise<CCProCode> {
-    const r = await this.req<JsonApiSingle<CCProCode>>(
-      'GET',
-      `/discount-codes-pro/${id}`,
-    );
+    const r = await this.req<JsonApiSingle<CCProCode>>('GET', `/discount-codes-pro/${id}`);
     return r.data;
   }
 
-  /** List pro codes for a container, optionally filter by customer code. */
   async listProCodes(containerId: number, page = 1, size = 50): Promise<JsonApiList<CCProCode>> {
     return this.req<JsonApiList<CCProCode>>(
       'GET',
@@ -237,57 +221,35 @@ export class CloudCartClient {
     );
   }
 
-  /**
-   * Create a personal loyalty pro code for a customer.
-   * - flat discount on all products = points / rate (in cents)
-   * - only_customer: 1 → must be logged in (prevents code sharing)
-   * - maxused_user: 1 → single-use per customer (auto-detects redemption via uses counter)
-   */
   async createProCode(params: {
     containerId: number;
     code: string;
     name: string;
-    valueCents: number;       // flat discount in cents (500 = €5)
-    conditions?: CCProCondition[];
+    conditions: CCProCondition[];
     customerGroupIds?: number[];
   }): Promise<CCProCode> {
-    const conditions: CCProCondition[] = params.conditions ?? [
-      { type: 'flat', setting: 'all', value: params.valueCents },
-    ];
-
-    const r = await this.req<JsonApiSingle<CCProCode>>(
-      'POST',
-      '/discount-codes-pro',
-      {
-        data: {
-          type: 'discount-codes-pro',
-          attributes: {
-            discount_id: params.containerId,
-            code: params.code,
-            name: params.name,
-            active: 1,
-            only_customer: 1,
-            maxused_user: 1,
-            date_start: new Date().toISOString().slice(0, 10),
-            conditions,
-            ...(params.customerGroupIds?.length
-              ? { customer_groups: params.customerGroupIds }
-              : {}),
-          },
+    const r = await this.req<JsonApiSingle<CCProCode>>('POST', '/discount-codes-pro', {
+      data: {
+        type: 'discount-codes-pro',
+        attributes: {
+          discount_id: params.containerId,
+          code: params.code,
+          name: params.name,
+          active: 1,
+          only_customer: 1,
+          maxused_user: 1,
+          date_start: new Date().toISOString().slice(0, 10),
+          conditions: params.conditions,
+          ...(params.customerGroupIds?.length
+            ? { customer_groups: params.customerGroupIds }
+            : {}),
         },
       },
-    );
+    });
     return r.data;
   }
 
-  /**
-   * Update the discount value on an existing pro code.
-   * Replaces the full conditions array with a new flat-all condition.
-   */
-  async updateProCodeValue(id: number, valueCents: number, conditions?: CCProCondition[]): Promise<CCProCode> {
-    const newConditions: CCProCondition[] = conditions ?? [
-      { type: 'flat', setting: 'all', value: valueCents },
-    ];
+  async updateProCodeConditions(id: number, conditions: CCProCondition[]): Promise<CCProCode> {
     const r = await this.req<JsonApiSingle<CCProCode>>(
       'PATCH',
       `/discount-codes-pro/${id}`,
@@ -295,7 +257,7 @@ export class CloudCartClient {
         data: {
           type: 'discount-codes-pro',
           id: String(id),
-          attributes: { conditions: newConditions, active: 1 },
+          attributes: { conditions, active: 1 },
         },
       },
     );

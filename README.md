@@ -1,42 +1,59 @@
-# CloudCart Loyalty Program
+# CloudCart Loyalty Program (Multi-Tenant)
 
-A fully serverless loyalty points CRM for CloudCart stores. Built with **Hono** on **Cloudflare Workers**, backed by **Supabase** (PostgreSQL).
-
-**Live admin dashboard:** https://loyalty-program.e-kurtisi.workers.dev/admin
-**Store:** smokezone.cloudcart.net
+A production-ready, multi-tenant loyalty points CRM for CloudCart stores. Every merchant gets their own isolated dashboard, webhook endpoint, and configuration. Built with **Hono** on **Cloudflare Workers**, backed by **Supabase** (PostgreSQL).
 
 ---
 
+## Architecture
+
+```
+                    ┌──────────────────────────────┐
+                    │   Cloudflare Workers (Hono)   │
+                    │   loyalty-program.workers.dev │
+                    └─────────────┬────────────────┘
+                                  │
+         ┌────────────────────────┼────────────────────────┐
+         │                        │                        │
+    /webhook/:slug/        /admin/:slug            /api/m/:slug/
+    cloudcart              (Dashboard)             admin/*
+         │                        │                        │
+   Per-merchant             Login → Token          Merchant-scoped
+   webhook secret           Bearer auth            CRUD endpoints
+         │                        │                        │
+         └────────────────────────┼────────────────────────┘
+                                  │
+                    ┌─────────────▼────────────────┐
+                    │     Supabase (PostgreSQL)     │
+                    │  All tables scoped by         │
+                    │  merchant_id                  │
+                    └──────────────────────────────┘
+```
+
 ## How It Works
 
-```
-Customer places order
-       │
-       ▼
-CloudCart fires webhook (order.updated / order.created)
-       │
-       ▼
-Loyalty Worker receives event
-       │
-       ├─ Calculates points  (order total × points_per_eur + bonus rules)
-       ├─ Updates Supabase   (balance, tier, transaction log)
-       ├─ Updates CloudCart customer note   (visible in admin panel)
-       ├─ Updates CloudCart customer group  (Bronze / Silver / Gold / …)
-       └─ Creates or updates personal promo code (e.g. LOYALTY3 = €12 off)
-```
+1. **Merchant onboarded** via super-admin API → gets a unique `slug`
+2. CloudCart webhook fires on order events → `POST /webhook/{slug}/cloudcart`
+3. Worker validates secret, calculates points, updates Supabase
+4. Syncs to CloudCart: customer note, tier group, personal promo code
+5. Merchant manages everything via dashboard at `/admin/{slug}`
 
-### What the customer sees
-- Their personal promo code (e.g. `LOYALTY3`) in their store profile
-- The code has a live EUR discount value based on their current points balance
-- They enter it at checkout like a normal coupon → discount applied automatically
+---
 
-### What the admin sees (CloudCart customer profile → Note field)
-```
-🎯 LOYALTY POINTS
-Points: 1,250
-Tier: Silver
-Promo code: LOYALTY3 (€12 discount)
-```
+## Discount Types (via CloudCart API)
+
+The system supports multiple discount types through the CloudCart `discount-codes-pro` API:
+
+| Type | CloudCart Condition | Example |
+|---|---|---|
+| **Flat amount** | `type: flat, setting: all` | €10 off entire order |
+| **Percentage** | `type: percent, setting: all` | 10% off entire order |
+| **Free shipping** | `type: shipping, setting: all` | Free shipping |
+| **Product-specific flat** | `type: flat, setting: product` | €5 off specific products |
+| **Category discount** | `type: percent, setting: category` | 15% off a category |
+| **Vendor/brand discount** | `type: flat, setting: vendor` | €10 off a brand |
+| **Order threshold** | `type: flat, setting: order_over` | €20 off orders over €100 |
+
+Merchants configure these as **Reward Types** in the dashboard. The default auto-applied reward converts points to a flat EUR discount. Additional rewards (free shipping at 500 pts, 10% off at 1000 pts) are created automatically for new merchants.
 
 ---
 
@@ -47,178 +64,137 @@ Promo code: LOYALTY3 (€12 discount)
 | Runtime | Cloudflare Workers |
 | Framework | Hono v4 |
 | Language | TypeScript |
-| Database | Supabase (PostgreSQL) |
+| Database | Supabase (PostgreSQL + pgcrypto) |
 | Deploy | `wrangler deploy` |
-| Admin UI | Alpine.js + Tailwind CSS (CDN, no build step) |
+| Admin UI | Alpine.js + Tailwind CSS (CDN) |
 
 ---
 
 ## Project Structure
 
 ```
-loyalty-program/
-├── src/
-│   ├── index.ts              # App entry point — routes + basic-auth middleware
-│   ├── types.ts              # TypeScript types (Env bindings, DB shapes, CC API shapes)
-│   ├── lib/
-│   │   ├── cloudcart.ts      # CloudCart API v2 client (customers, groups, discount codes, webhooks)
-│   │   ├── supabase.ts       # Supabase client factory + settings loader
-│   │   └── points.ts         # Points engine: calculate, award, tier lookup, promo code upsert
-│   ├── routes/
-│   │   ├── webhook.ts        # POST /webhook/cloudcart — handles order events
-│   │   ├── admin.ts          # /api/admin/* — customers, tiers, rules, settings, stats
-│   │   └── setup.ts          # /api/setup — one-time setup + customer import
-│   └── ui/
-│       └── dashboard.ts      # Admin SPA (full HTML string served from the Worker)
-├── supabase/
-│   └── schema.sql            # Run once in Supabase SQL editor to create all tables
-├── wrangler.toml             # Cloudflare Workers config
-├── package.json
-└── tsconfig.json
+src/
+├── index.ts              # Entry point — auth middleware, routing, super-admin API
+├── types.ts              # TypeScript types (multi-tenant)
+├── lib/
+│   ├── cloudcart.ts      # CloudCart API v2 client (per-merchant)
+│   ├── supabase.ts       # Supabase client + merchant/settings loaders
+│   └── points.ts         # Points engine, reward conditions, promo code sync
+├── routes/
+│   ├── webhook.ts        # POST /webhook/:slug/cloudcart
+│   ├── admin.ts          # /api/m/:slug/admin/* — merchant-scoped CRUD
+│   └── setup.ts          # /api/m/:slug/setup — per-merchant setup wizard
+└── ui/
+    └── dashboard.ts      # Login page + merchant admin SPA
+
+supabase/
+├── schema.sql            # Multi-tenant schema with triggers
+└── functions.sql         # pgcrypto password hashing functions
 ```
 
 ---
 
-## Database Schema (Supabase)
+## Database Schema
 
 | Table | Purpose |
 |---|---|
-| `settings` | Key/value config (points rate, trigger status, etc.) |
-| `tiers` | Tier definitions (Bronze → Diamond) with CloudCart group IDs |
-| `loyalty_customers` | One row per customer — points balance, tier, promo code |
-| `points_transactions` | Full audit log of every earn / redeem / adjust |
-| `bonus_rules` | Configurable bonus rules (hero products, multipliers, etc.) |
-| `processed_orders` | Idempotency table — prevents double-awarding points |
-| `webhook_logs` | Raw CloudCart webhook payloads for debugging |
-
----
-
-## API Reference
-
-All `/api/admin/*` and `/api/setup` endpoints require **Basic Auth** (`admin` / your password).
-
-| Method | Endpoint | Description |
-|---|---|---|
-| `GET` | `/` | Health check |
-| `GET` | `/admin` | Admin dashboard UI |
-| `POST` | `/webhook/cloudcart` | CloudCart webhook receiver |
-| `GET` | `/webhook/cloudcart/logs` | Last 20 raw webhook payloads (debug) |
-| `GET` | `/api/admin/stats` | Overview stats |
-| `GET` | `/api/admin/customers` | List customers (`?search=&page=&size=`) |
-| `GET` | `/api/admin/customers/:id` | Single customer |
-| `POST` | `/api/admin/customers/:id/adjust` | Manual points adjustment |
-| `POST` | `/api/admin/customers/:id/redeem` | Manual redemption |
-| `POST` | `/api/admin/customers/:id/sync` | Force re-sync to CloudCart |
-| `GET/POST` | `/api/admin/tiers` | List / create tiers |
-| `PATCH/DELETE` | `/api/admin/tiers/:id` | Update / delete tier |
-| `GET/POST` | `/api/admin/rules` | List / create bonus rules |
-| `PATCH/DELETE` | `/api/admin/rules/:id` | Update / delete bonus rule |
-| `GET/PATCH` | `/api/admin/settings` | Read / update global settings |
-| `GET` | `/api/admin/transactions` | Points transaction log |
-| `POST` | `/api/setup` | One-time setup (creates CC groups + webhooks) |
-| `POST` | `/api/setup/sync-existing` | Import all existing CloudCart customers |
-
----
-
-## Configuration (Settings)
-
-Managed via the admin dashboard → **Settings** tab, or `PATCH /api/admin/settings`.
-
-| Key | Default | Description |
-|---|---|---|
-| `points_per_eur` | `2` | Points earned per €1 spent |
-| `points_to_eur_rate` | `100` | Points needed for €1 discount on promo code |
-| `min_order_eur` | `0` | Minimum order value (€) to earn points |
-| `trigger_status` | `paid` | Order status that triggers point award |
-| `promo_code_prefix` | `LOYALTY` | Prefix for personal codes (`LOYALTY3`, `LOYALTY42`, …) |
-| `store_name` | `Smokezone` | Displayed in dashboard header |
-
-### Default Tiers
-
-| Tier | Min Points | Equivalent spend (at 2 pts/€) |
-|---|---|---|
-| Bronze | 1,000 | €500 |
-| Silver | 2,000 | €1,000 |
-| Gold | 3,000 | €1,500 |
-| Platinum | 4,000 | €2,000 |
-| Diamond | 5,000 | €2,500 |
-
----
-
-## Bonus Rules
-
-Configure in the **⚡ Bonus Rules** tab. Four types:
-
-| Type | Effect | Example config |
-|---|---|---|
-| `product_ids` | Extra points if order contains specific products | `{"product_ids": [123, 456]}` |
-| `minimum_order` | Flat bonus on orders above a threshold | `{"min_order_eur": 200}` |
-| `multiplier` | Multiply base points by a factor | multiplier = `2.0` |
-| `flat_bonus` | Add fixed points to every qualifying order | extra_points = `50` |
-
-Rules support optional `valid_from` / `valid_until` dates for time-limited campaigns.
-
----
-
-## Local Development
-
-```bash
-npm install
-npx wrangler dev        # runs locally at http://localhost:8787
-```
-
-For local dev, create a `.dev.vars` file (never commit this):
-```env
-CLOUDCART_API_KEY=your_key
-CLOUDCART_BASE_URL=https://smokezone.cloudcart.net/api/v2
-SUPABASE_URL=https://sguuwljmkmehudxhxkvl.supabase.co
-SUPABASE_SERVICE_KEY=your_service_role_key
-ADMIN_USERNAME=admin
-ADMIN_PASSWORD=your_password
-WEBHOOK_SECRET=your_webhook_secret
-```
+| `merchants` | One row per CloudCart store (credentials, config) |
+| `settings` | Key/value config per merchant |
+| `tiers` | Tier definitions per merchant |
+| `reward_types` | Configurable discount types per merchant |
+| `loyalty_customers` | Customer points/tiers scoped by merchant |
+| `points_transactions` | Full audit log per merchant |
+| `bonus_rules` | Bonus point rules per merchant |
+| `processed_orders` | Idempotency per merchant |
+| `webhook_logs` | Raw webhook payloads per merchant |
 
 ---
 
 ## Deployment
 
+### 1. Supabase Setup
+
 ```bash
-npm run deploy          # deploys to Cloudflare Workers
+# Run in Supabase SQL editor (in order):
+# 1. supabase/schema.sql
+# 2. supabase/functions.sql
 ```
 
-Secrets are managed via Wrangler (stored in Cloudflare, never in the repo):
+### 2. Cloudflare Workers
+
 ```bash
-echo "value" | npx wrangler secret put SECRET_NAME
+npm install
+npx wrangler login
+
+# Set secrets
+npx wrangler secret put SUPABASE_URL
+npx wrangler secret put SUPABASE_SERVICE_KEY
+npx wrangler secret put SUPER_ADMIN_KEY
+
+# Deploy
+npm run deploy
 ```
 
-Required secrets: `CLOUDCART_API_KEY`, `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`, `ADMIN_PASSWORD`, `WEBHOOK_SECRET`
+### 3. Onboard a Merchant
 
-The `ADMIN_USERNAME` var is set in `wrangler.toml` (non-sensitive, defaults to `admin`).
+```bash
+curl -X POST https://loyalty-program.YOUR.workers.dev/api/super/merchants \
+  -H "X-Super-Admin-Key: YOUR_SUPER_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "slug": "smokezone",
+    "store_name": "Smokezone",
+    "cloudcart_base_url": "https://smokezone.cloudcart.net/api/v2",
+    "cloudcart_api_key": "YOUR_CLOUDCART_KEY",
+    "admin_email": "admin@smokezone.com",
+    "admin_password": "secure-password"
+  }'
+```
+
+### 4. Merchant First Login
+
+1. Go to `https://loyalty-program.YOUR.workers.dev/admin`
+2. Enter slug + password
+3. Click **Run Setup** to create CloudCart groups + webhooks
+4. Click **Sync Customers** to import existing customers
 
 ---
 
-## First-Time Setup (new store / new deployment)
+## API Reference
 
-1. Run `supabase/schema.sql` in Supabase SQL editor
-2. Set all secrets via `wrangler secret put`
-3. `npm run deploy`
-4. `POST /api/setup` — creates CloudCart tier groups + registers webhooks
-5. `POST /api/setup/sync-existing` — imports existing customers
+### Public
 
----
+| Method | Endpoint | Description |
+|---|---|---|
+| `GET` | `/` | Health check |
+| `POST` | `/webhook/:slug/cloudcart` | Merchant webhook receiver |
+| `POST` | `/api/login` | Merchant login (returns token) |
+| `GET` | `/admin` | Login page |
+| `GET` | `/admin/:slug` | Merchant dashboard |
 
-## Cloudflare Notes
+### Merchant API (Bearer token required)
 
-- **Rate limit:** CloudCart API allows 50 req/min (plan default). Upgradeable in CloudCart admin → Settings → API Keys.
-- **Webhook secret:** CloudCart sends `X-Loyalty-Secret` header on every webhook. Value must match the `WEBHOOK_SECRET` env var.
-- **Idempotency:** Each order is recorded in `processed_orders` — safe to receive the same webhook multiple times.
-- **Safety cap:** Orders over €50,000 are ignored (likely bad data) and logged.
+| Method | Endpoint | Description |
+|---|---|---|
+| `GET/PATCH` | `/api/m/:slug/admin/settings` | Settings |
+| `GET/POST` | `/api/m/:slug/admin/tiers` | Tiers |
+| `PATCH/DELETE` | `/api/m/:slug/admin/tiers/:id` | Tier ops |
+| `GET/POST` | `/api/m/:slug/admin/rewards` | Reward types |
+| `PATCH/DELETE` | `/api/m/:slug/admin/rewards/:id` | Reward ops |
+| `GET/POST` | `/api/m/:slug/admin/rules` | Bonus rules |
+| `PATCH/DELETE` | `/api/m/:slug/admin/rules/:id` | Rule ops |
+| `GET` | `/api/m/:slug/admin/customers` | List customers |
+| `POST` | `/api/m/:slug/admin/customers/:id/adjust` | Adjust points |
+| `POST` | `/api/m/:slug/admin/customers/:id/redeem` | Redeem points |
+| `POST` | `/api/m/:slug/admin/customers/:id/sync` | Sync to CloudCart |
+| `GET` | `/api/m/:slug/admin/stats` | Stats overview |
+| `GET` | `/api/m/:slug/admin/transactions` | Transaction log |
+| `POST` | `/api/m/:slug/setup` | Run initial setup |
+| `POST` | `/api/m/:slug/setup/sync-existing` | Import customers |
 
----
+### Super-Admin (X-Super-Admin-Key header required)
 
-## CloudCart API Notes
-
-- All monetary values in the CloudCart API are in **cents** (integer). `price_total: 15000` = €150.00
-- Discount code `value` is in **EUR** (integer). `value: 12` = €12 off.
-- Discount code `code` must be **alphanumeric only** (no hyphens/spaces). Format: `LOYALTY{customer_id}`
-- Webhook events available: `order.created`, `order.updated`
+| Method | Endpoint | Description |
+|---|---|---|
+| `POST` | `/api/super/merchants` | Onboard new merchant |
+| `GET` | `/api/super/merchants` | List all merchants |

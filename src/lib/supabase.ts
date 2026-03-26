@@ -1,5 +1,5 @@
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
-import type { Env, DbSettings } from '../types';
+import type { Env, DbSettings, DbMerchant } from '../types';
 
 export function getSupabase(env: Env): SupabaseClient {
   return createClient(env.SUPABASE_URL, env.SUPABASE_SERVICE_KEY, {
@@ -7,8 +7,40 @@ export function getSupabase(env: Env): SupabaseClient {
   });
 }
 
-export async function loadSettings(db: SupabaseClient): Promise<DbSettings> {
-  const { data, error } = await db.from('settings').select('key, value');
+export async function getMerchantBySlug(
+  db: SupabaseClient,
+  slug: string,
+): Promise<DbMerchant | null> {
+  const { data } = await db
+    .from('merchants')
+    .select('*')
+    .eq('slug', slug)
+    .eq('active', true)
+    .maybeSingle();
+  return data;
+}
+
+export async function getMerchantById(
+  db: SupabaseClient,
+  id: string,
+): Promise<DbMerchant | null> {
+  const { data } = await db
+    .from('merchants')
+    .select('*')
+    .eq('id', id)
+    .eq('active', true)
+    .maybeSingle();
+  return data;
+}
+
+export async function loadSettings(
+  db: SupabaseClient,
+  merchantId: string,
+): Promise<DbSettings> {
+  const { data, error } = await db
+    .from('settings')
+    .select('key, value')
+    .eq('merchant_id', merchantId);
   if (error) throw new Error(`loadSettings: ${error.message}`);
 
   const map: Record<string, string> = {};
@@ -20,18 +52,18 @@ export async function loadSettings(db: SupabaseClient): Promise<DbSettings> {
     trigger_status: map['trigger_status'] ?? 'paid',
     points_to_eur_rate: Number(map['points_to_eur_rate'] ?? 100),
     promo_code_prefix: map['promo_code_prefix'] ?? 'LOYALTY',
-    store_name: map['store_name'] ?? 'Store',
-    loyalty_container_id: map['loyalty_container_id'] ? Number(map['loyalty_container_id']) : null,
   };
 }
 
 export async function saveSetting(
   db: SupabaseClient,
+  merchantId: string,
   key: string,
   value: string,
 ): Promise<void> {
-  const { error } = await db
-    .from('settings')
-    .upsert({ key, value, updated_at: new Date().toISOString() });
+  const { error } = await db.from('settings').upsert(
+    { merchant_id: merchantId, key, value, updated_at: new Date().toISOString() },
+    { onConflict: 'merchant_id,key' },
+  );
   if (error) throw new Error(`saveSetting(${key}): ${error.message}`);
 }

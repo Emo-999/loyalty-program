@@ -1,36 +1,41 @@
 import { Hono } from 'hono';
-import type { Env } from '../types';
+import type { Env, AppVariables } from '../types';
 import { getSupabase, loadSettings, saveSetting } from '../lib/supabase';
 import { CloudCartClient } from '../lib/cloudcart';
-import { awardPoints, buildCustomerNote, pointsToEur, getTierForPoints } from '../lib/points';
+import { buildCustomerNote, pointsToEur, getTierForPoints } from '../lib/points';
+import { generateCustomerToken } from './customer';
 
-const admin = new Hono<{ Bindings: Env }>();
+const admin = new Hono<{ Bindings: Env; Variables: AppVariables }>();
 
 // ============================================================
 // Settings
 // ============================================================
 
 admin.get('/settings', async (c) => {
+  const merchant = c.get('merchant');
   const db = getSupabase(c.env);
-  const settings = await loadSettings(db);
-  return c.json(settings);
+  const settings = await loadSettings(db, merchant.id);
+  return c.json({ ...settings, store_name: merchant.store_name });
 });
 
 admin.patch('/settings', async (c) => {
+  const merchant = c.get('merchant');
   const db = getSupabase(c.env);
   const body = await c.req.json<Record<string, string>>();
   const allowed = [
-    'points_per_eur',
-    'min_order_eur',
-    'trigger_status',
-    'points_to_eur_rate',
-    'promo_code_prefix',
-    'store_name',
+    'points_per_eur', 'min_order_eur', 'trigger_status',
+    'points_to_eur_rate', 'promo_code_prefix',
   ];
   for (const [key, value] of Object.entries(body)) {
-    if (allowed.includes(key)) await saveSetting(db, key, String(value));
+    if (allowed.includes(key)) await saveSetting(db, merchant.id, key, String(value));
   }
-  return c.json(await loadSettings(db));
+  if (body['store_name']) {
+    await db.from('merchants')
+      .update({ store_name: body['store_name'], updated_at: new Date().toISOString() })
+      .eq('id', merchant.id);
+  }
+  const settings = await loadSettings(db, merchant.id);
+  return c.json({ ...settings, store_name: body['store_name'] ?? merchant.store_name });
 });
 
 // ============================================================
@@ -38,21 +43,24 @@ admin.patch('/settings', async (c) => {
 // ============================================================
 
 admin.get('/tiers', async (c) => {
+  const merchant = c.get('merchant');
   const db = getSupabase(c.env);
   const { data, error } = await db
     .from('tiers')
     .select('*')
+    .eq('merchant_id', merchant.id)
     .order('sort_order', { ascending: true });
   if (error) return c.json({ error: error.message }, 500);
   return c.json(data);
 });
 
 admin.post('/tiers', async (c) => {
+  const merchant = c.get('merchant');
   const db = getSupabase(c.env);
   const body = await c.req.json();
   const { data, error } = await db
     .from('tiers')
-    .insert(body)
+    .insert({ ...body, merchant_id: merchant.id })
     .select()
     .single();
   if (error) return c.json({ error: error.message }, 400);
@@ -60,12 +68,14 @@ admin.post('/tiers', async (c) => {
 });
 
 admin.patch('/tiers/:id', async (c) => {
+  const merchant = c.get('merchant');
   const db = getSupabase(c.env);
   const body = await c.req.json();
   const { data, error } = await db
     .from('tiers')
     .update(body)
     .eq('id', c.req.param('id'))
+    .eq('merchant_id', merchant.id)
     .select()
     .single();
   if (error) return c.json({ error: error.message }, 400);
@@ -73,8 +83,65 @@ admin.patch('/tiers/:id', async (c) => {
 });
 
 admin.delete('/tiers/:id', async (c) => {
+  const merchant = c.get('merchant');
   const db = getSupabase(c.env);
-  const { error } = await db.from('tiers').delete().eq('id', c.req.param('id'));
+  const { error } = await db.from('tiers').delete()
+    .eq('id', c.req.param('id'))
+    .eq('merchant_id', merchant.id);
+  if (error) return c.json({ error: error.message }, 400);
+  return c.json({ ok: true });
+});
+
+// ============================================================
+// Reward types
+// ============================================================
+
+admin.get('/rewards', async (c) => {
+  const merchant = c.get('merchant');
+  const db = getSupabase(c.env);
+  const { data, error } = await db
+    .from('reward_types')
+    .select('*')
+    .eq('merchant_id', merchant.id)
+    .order('sort_order', { ascending: true });
+  if (error) return c.json({ error: error.message }, 500);
+  return c.json(data);
+});
+
+admin.post('/rewards', async (c) => {
+  const merchant = c.get('merchant');
+  const db = getSupabase(c.env);
+  const body = await c.req.json();
+  const { data, error } = await db
+    .from('reward_types')
+    .insert({ ...body, merchant_id: merchant.id })
+    .select()
+    .single();
+  if (error) return c.json({ error: error.message }, 400);
+  return c.json(data, 201);
+});
+
+admin.patch('/rewards/:id', async (c) => {
+  const merchant = c.get('merchant');
+  const db = getSupabase(c.env);
+  const body = await c.req.json();
+  const { data, error } = await db
+    .from('reward_types')
+    .update(body)
+    .eq('id', c.req.param('id'))
+    .eq('merchant_id', merchant.id)
+    .select()
+    .single();
+  if (error) return c.json({ error: error.message }, 400);
+  return c.json(data);
+});
+
+admin.delete('/rewards/:id', async (c) => {
+  const merchant = c.get('merchant');
+  const db = getSupabase(c.env);
+  const { error } = await db.from('reward_types').delete()
+    .eq('id', c.req.param('id'))
+    .eq('merchant_id', merchant.id);
   if (error) return c.json({ error: error.message }, 400);
   return c.json({ ok: true });
 });
@@ -84,21 +151,24 @@ admin.delete('/tiers/:id', async (c) => {
 // ============================================================
 
 admin.get('/rules', async (c) => {
+  const merchant = c.get('merchant');
   const db = getSupabase(c.env);
   const { data, error } = await db
     .from('bonus_rules')
     .select('*')
+    .eq('merchant_id', merchant.id)
     .order('created_at', { ascending: false });
   if (error) return c.json({ error: error.message }, 500);
   return c.json(data);
 });
 
 admin.post('/rules', async (c) => {
+  const merchant = c.get('merchant');
   const db = getSupabase(c.env);
   const body = await c.req.json();
   const { data, error } = await db
     .from('bonus_rules')
-    .insert(body)
+    .insert({ ...body, merchant_id: merchant.id })
     .select()
     .single();
   if (error) return c.json({ error: error.message }, 400);
@@ -106,12 +176,14 @@ admin.post('/rules', async (c) => {
 });
 
 admin.patch('/rules/:id', async (c) => {
+  const merchant = c.get('merchant');
   const db = getSupabase(c.env);
   const body = await c.req.json();
   const { data, error } = await db
     .from('bonus_rules')
     .update(body)
     .eq('id', c.req.param('id'))
+    .eq('merchant_id', merchant.id)
     .select()
     .single();
   if (error) return c.json({ error: error.message }, 400);
@@ -119,11 +191,11 @@ admin.patch('/rules/:id', async (c) => {
 });
 
 admin.delete('/rules/:id', async (c) => {
+  const merchant = c.get('merchant');
   const db = getSupabase(c.env);
-  const { error } = await db
-    .from('bonus_rules')
-    .delete()
-    .eq('id', c.req.param('id'));
+  const { error } = await db.from('bonus_rules').delete()
+    .eq('id', c.req.param('id'))
+    .eq('merchant_id', merchant.id);
   if (error) return c.json({ error: error.message }, 400);
   return c.json({ ok: true });
 });
@@ -133,6 +205,7 @@ admin.delete('/rules/:id', async (c) => {
 // ============================================================
 
 admin.get('/customers', async (c) => {
+  const merchant = c.get('merchant');
   const db = getSupabase(c.env);
   const page = Number(c.req.query('page') ?? 1);
   const size = Number(c.req.query('size') ?? 20);
@@ -144,6 +217,7 @@ admin.get('/customers', async (c) => {
   let query = db
     .from('loyalty_customers')
     .select('*, tiers(id, name, min_points, sort_order)', { count: 'exact' })
+    .eq('merchant_id', merchant.id)
     .order('points_balance', { ascending: false })
     .range(from, to);
 
@@ -159,20 +233,22 @@ admin.get('/customers', async (c) => {
 });
 
 admin.get('/customers/:id', async (c) => {
+  const merchant = c.get('merchant');
   const db = getSupabase(c.env);
   const { data, error } = await db
     .from('loyalty_customers')
     .select('*, tiers(*)')
     .eq('id', c.req.param('id'))
+    .eq('merchant_id', merchant.id)
     .single();
   if (error) return c.json({ error: error.message }, 404);
   return c.json(data);
 });
 
-// Manual points adjustment
 admin.post('/customers/:id/adjust', async (c) => {
+  const merchant = c.get('merchant');
   const db = getSupabase(c.env);
-  const cc = new CloudCartClient(c.env.CLOUDCART_API_KEY, c.env.CLOUDCART_BASE_URL);
+  const cc = CloudCartClient.forMerchant(merchant);
   const { points, description } = await c.req.json<{
     points: number;
     description?: string;
@@ -182,13 +258,14 @@ admin.post('/customers/:id/adjust', async (c) => {
     .from('loyalty_customers')
     .select('*, tiers(*)')
     .eq('id', c.req.param('id'))
+    .eq('merchant_id', merchant.id)
     .single();
 
   if (fetchErr) return c.json({ error: 'Customer not found' }, 404);
 
   const newBalance = Math.max(0, customer.points_balance + points);
-  const settings = await loadSettings(db);
-  const { data: tiers } = await db.from('tiers').select('*');
+  const settings = await loadSettings(db, merchant.id);
+  const { data: tiers } = await db.from('tiers').select('*').eq('merchant_id', merchant.id);
   const newTier = getTierForPoints(newBalance, tiers ?? []);
 
   await db
@@ -201,30 +278,26 @@ admin.post('/customers/:id/adjust', async (c) => {
     .eq('id', customer.id);
 
   await db.from('points_transactions').insert({
+    merchant_id: merchant.id,
     customer_id: customer.id,
     type: 'adjust',
     points,
-    description: description ?? `Manual adjustment by admin`,
+    description: description ?? 'Manual adjustment by admin',
   });
 
-  // Sync to CloudCart
   const promoValueEur = pointsToEur(newBalance, settings.points_to_eur_rate);
   const note = buildCustomerNote(newBalance, newTier, customer.promo_code, promoValueEur);
   const attrs: Record<string, unknown> = { note };
   if (newTier?.cloudcart_group_id) attrs['group_id'] = newTier.cloudcart_group_id;
   await cc.updateCustomer(customer.cloudcart_id, attrs as Parameters<typeof cc.updateCustomer>[1]);
 
-  if (customer.promo_code_cloudcart_id) {
-    await cc.updateDiscountCode(customer.promo_code_cloudcart_id, promoValueEur);
-  }
-
   return c.json({ ok: true, new_balance: newBalance, tier: newTier?.name ?? null });
 });
 
-// Redeem points (manually mark a redemption)
 admin.post('/customers/:id/redeem', async (c) => {
+  const merchant = c.get('merchant');
   const db = getSupabase(c.env);
-  const cc = new CloudCartClient(c.env.CLOUDCART_API_KEY, c.env.CLOUDCART_BASE_URL);
+  const cc = CloudCartClient.forMerchant(merchant);
   const { points, description } = await c.req.json<{
     points: number;
     description?: string;
@@ -234,12 +307,13 @@ admin.post('/customers/:id/redeem', async (c) => {
     .from('loyalty_customers')
     .select('*, tiers(*)')
     .eq('id', c.req.param('id'))
+    .eq('merchant_id', merchant.id)
     .single();
   if (error) return c.json({ error: 'Customer not found' }, 404);
 
   const newBalance = Math.max(0, customer.points_balance - points);
-  const settings = await loadSettings(db);
-  const { data: tiers } = await db.from('tiers').select('*');
+  const settings = await loadSettings(db, merchant.id);
+  const { data: tiers } = await db.from('tiers').select('*').eq('merchant_id', merchant.id);
   const newTier = getTierForPoints(newBalance, tiers ?? []);
 
   await db
@@ -252,17 +326,14 @@ admin.post('/customers/:id/redeem', async (c) => {
     .eq('id', customer.id);
 
   await db.from('points_transactions').insert({
+    merchant_id: merchant.id,
     customer_id: customer.id,
     type: 'redeem',
     points: -Math.abs(points),
-    description: description ?? `Redemption`,
+    description: description ?? 'Redemption',
   });
 
-  // Sync promo code value
   const promoValueEur = pointsToEur(newBalance, settings.points_to_eur_rate);
-  if (customer.promo_code_cloudcart_id) {
-    await cc.updateDiscountCode(customer.promo_code_cloudcart_id, promoValueEur);
-  }
   const note = buildCustomerNote(newBalance, newTier, customer.promo_code, promoValueEur);
   const attrs: Record<string, unknown> = { note };
   if (newTier?.cloudcart_group_id) attrs['group_id'] = newTier.cloudcart_group_id;
@@ -276,6 +347,7 @@ admin.post('/customers/:id/redeem', async (c) => {
 // ============================================================
 
 admin.get('/transactions', async (c) => {
+  const merchant = c.get('merchant');
   const db = getSupabase(c.env);
   const page = Number(c.req.query('page') ?? 1);
   const size = Number(c.req.query('size') ?? 30);
@@ -287,9 +359,10 @@ admin.get('/transactions', async (c) => {
   let query = db
     .from('points_transactions')
     .select(
-      `*, loyalty_customers(id, email, first_name, last_name, cloudcart_id)`,
+      '*, loyalty_customers(id, email, first_name, last_name, cloudcart_id)',
       { count: 'exact' },
     )
+    .eq('merchant_id', merchant.id)
     .order('created_at', { ascending: false })
     .range(from, to);
 
@@ -305,15 +378,17 @@ admin.get('/transactions', async (c) => {
 // ============================================================
 
 admin.get('/stats', async (c) => {
+  const merchant = c.get('merchant');
   const db = getSupabase(c.env);
 
   const [{ count: totalCustomers }, { data: pointsData }, { data: tierData }] =
     await Promise.all([
-      db.from('loyalty_customers').select('*', { count: 'exact', head: true }),
-      db.from('loyalty_customers').select('points_balance'),
-      db
-        .from('loyalty_customers')
-        .select('tiers(name)')
+      db.from('loyalty_customers').select('*', { count: 'exact', head: true })
+        .eq('merchant_id', merchant.id),
+      db.from('loyalty_customers').select('points_balance')
+        .eq('merchant_id', merchant.id),
+      db.from('loyalty_customers').select('tiers(name)')
+        .eq('merchant_id', merchant.id)
         .not('tier_id', 'is', null),
     ]);
 
@@ -331,11 +406,13 @@ admin.get('/stats', async (c) => {
 
   const { count: totalTransactions } = await db
     .from('points_transactions')
-    .select('*', { count: 'exact', head: true });
+    .select('*', { count: 'exact', head: true })
+    .eq('merchant_id', merchant.id);
 
   const { data: recentTx } = await db
     .from('points_transactions')
-    .select(`*, loyalty_customers(email, first_name, last_name)`)
+    .select('*, loyalty_customers(email, first_name, last_name)')
+    .eq('merchant_id', merchant.id)
     .order('created_at', { ascending: false })
     .limit(10);
 
@@ -353,14 +430,16 @@ admin.get('/stats', async (c) => {
 // ============================================================
 
 admin.post('/customers/:id/sync', async (c) => {
+  const merchant = c.get('merchant');
   const db = getSupabase(c.env);
-  const cc = new CloudCartClient(c.env.CLOUDCART_API_KEY, c.env.CLOUDCART_BASE_URL);
-  const settings = await loadSettings(db);
+  const cc = CloudCartClient.forMerchant(merchant);
+  const settings = await loadSettings(db, merchant.id);
 
   const { data: customer, error } = await db
     .from('loyalty_customers')
     .select('*, tiers(*)')
     .eq('id', c.req.param('id'))
+    .eq('merchant_id', merchant.id)
     .single();
   if (error) return c.json({ error: 'Not found' }, 404);
 
@@ -372,11 +451,47 @@ admin.post('/customers/:id/sync', async (c) => {
   if (tier?.cloudcart_group_id) attrs['group_id'] = tier.cloudcart_group_id;
   await cc.updateCustomer(customer.cloudcart_id, attrs as Parameters<typeof cc.updateCustomer>[1]);
 
-  if (customer.promo_code_cloudcart_id) {
-    await cc.updateDiscountCode(customer.promo_code_cloudcart_id, promoValueEur);
-  }
-
   return c.json({ ok: true });
+});
+
+// ============================================================
+// Generate customer widget token (for embed snippets)
+// ============================================================
+
+admin.get('/customers/:id/token', async (c) => {
+  const merchant = c.get('merchant');
+  const db = getSupabase(c.env);
+  const { data: customer, error } = await db
+    .from('loyalty_customers')
+    .select('email')
+    .eq('id', c.req.param('id'))
+    .eq('merchant_id', merchant.id)
+    .single();
+  if (error) return c.json({ error: 'Not found' }, 404);
+
+  const token = await generateCustomerToken(customer.email, merchant.webhook_secret);
+  return c.json({ email: customer.email, token });
+});
+
+// Generate embed snippet for the merchant
+admin.get('/embed-info', async (c) => {
+  const merchant = c.get('merchant');
+  const url = new URL(c.req.url);
+  const origin = `${url.protocol}//${url.host}`;
+
+  return c.json({
+    slug: merchant.slug,
+    loyalty_page_url: `${origin}/c/${merchant.slug}/page?email={CUSTOMER_EMAIL}&token={CUSTOMER_TOKEN}`,
+    widget_url: `${origin}/c/${merchant.slug}/widget?email={CUSTOMER_EMAIL}&token={CUSTOMER_TOKEN}`,
+    embed_script_url: `${origin}/c/${merchant.slug}/embed.js`,
+    console_script: `${origin}/c/${merchant.slug}/console.js`,
+    instructions: [
+      '1. Generate a token for a customer via GET /api/m/:slug/admin/customers/:id/token',
+      '2. Full page: redirect customer to the loyalty_page_url (replace placeholders)',
+      '3. Embed widget: add <div id="loyalty-widget" data-email="X" data-token="Y"></div><script src="EMBED_SCRIPT_URL"></script>',
+      '4. Console test: paste the console script URL contents into Chrome DevTools console on the store',
+    ],
+  });
 });
 
 export default admin;

@@ -2,13 +2,129 @@
 // Cloudflare Worker environment bindings
 // ============================================================
 export interface Env {
-  CLOUDCART_API_KEY: string;
-  CLOUDCART_BASE_URL: string;
   SUPABASE_URL: string;
   SUPABASE_SERVICE_KEY: string;
-  ADMIN_USERNAME: string;
-  ADMIN_PASSWORD: string;
-  WEBHOOK_SECRET: string;
+  SUPER_ADMIN_KEY: string;
+}
+
+// ============================================================
+// Merchant (tenant)
+// ============================================================
+export interface DbMerchant {
+  id: string;
+  slug: string;
+  store_name: string;
+  cloudcart_base_url: string;
+  cloudcart_api_key: string;
+  admin_email: string;
+  admin_password_hash: string;
+  webhook_secret: string;
+  loyalty_container_id: number | null;
+  active: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+// ============================================================
+// Settings (per-merchant key/value)
+// ============================================================
+export interface DbSettings {
+  points_per_eur: number;
+  min_order_eur: number;
+  trigger_status: string;
+  points_to_eur_rate: number;
+  promo_code_prefix: string;
+}
+
+// ============================================================
+// Tiers
+// ============================================================
+export interface DbTier {
+  id: string;
+  merchant_id: string;
+  name: string;
+  min_points: number;
+  cloudcart_group_id: number | null;
+  sort_order: number;
+  created_at: string;
+}
+
+// ============================================================
+// Reward types (discount flavours a merchant offers)
+// ============================================================
+export type DiscountMethod = 'flat' | 'percent' | 'shipping';
+export type DiscountTarget = 'all' | 'product' | 'category' | 'vendor' | 'order_over' | 'selection';
+
+export interface DbRewardType {
+  id: string;
+  merchant_id: string;
+  name: string;
+  description: string | null;
+  discount_method: DiscountMethod;
+  discount_target: DiscountTarget;
+  discount_value: number;
+  min_points_cost: number;
+  order_over_cents: number | null;
+  product_ids: number[];
+  category_ids: number[];
+  vendor_ids: number[];
+  auto_apply: boolean;
+  active: boolean;
+  sort_order: number;
+  created_at: string;
+}
+
+// ============================================================
+// Customers
+// ============================================================
+export interface DbCustomer {
+  id: string;
+  merchant_id: string;
+  cloudcart_id: number;
+  email: string;
+  first_name: string | null;
+  last_name: string | null;
+  points_balance: number;
+  lifetime_points: number;
+  tier_id: string | null;
+  promo_code: string | null;
+  promo_code_cloudcart_id: number | null;
+  created_at: string;
+  updated_at: string;
+  tiers?: DbTier;
+}
+
+// ============================================================
+// Transactions
+// ============================================================
+export interface DbTransaction {
+  id: string;
+  merchant_id: string;
+  customer_id: string;
+  cloudcart_order_id: number | null;
+  type: 'earn' | 'redeem' | 'adjust' | 'expire';
+  points: number;
+  order_value_cents: number | null;
+  description: string | null;
+  created_at: string;
+}
+
+// ============================================================
+// Bonus rules
+// ============================================================
+export interface DbBonusRule {
+  id: string;
+  merchant_id: string;
+  name: string;
+  description: string | null;
+  type: 'product_ids' | 'minimum_order' | 'multiplier' | 'flat_bonus';
+  config: Record<string, unknown>;
+  extra_points: number;
+  multiplier: number;
+  active: boolean;
+  valid_from: string | null;
+  valid_until: string | null;
+  created_at: string;
 }
 
 // ============================================================
@@ -22,9 +138,9 @@ export interface CCCustomer {
     email: string;
     group_id: number;
     note: string | null;
-    income: number;               // cents
+    income: number;
     completed_orders: number;
-    orders_total_price: number;   // cents
+    orders_total_price: number;
     last_order_date: string | null;
     date_added: string;
     updated_at: string;
@@ -38,10 +154,10 @@ export interface CCOrder {
     customer_email: string;
     customer_first_name: string;
     customer_last_name: string;
-    price_total: number;          // cents
+    price_total: number;
     currency: string;
-    status: string;               // pending | paid | completed | ...
-    status_fulfillment: string;   // not_fulfilled | fulfilled
+    status: string;
+    status_fulfillment: string;
     date_added: string;
     updated_at: string;
   };
@@ -56,25 +172,23 @@ export interface CCDiscountCode {
   id: string;
   attributes: {
     code: string;
-    value: number;   // EUR (not cents)
+    value: number;
     active: number;
     created_at: string;
     updated_at: string;
   };
 }
 
-// discount-codes-pro condition object
 export interface CCProCondition {
   type: 'flat' | 'percent' | 'shipping';
   setting: 'all' | 'product' | 'category' | 'vendor' | 'category_vendor' | 'order_over' | 'selection';
-  value: number;        // cents for flat (500 = €5), hundredths for percent (1000 = 10%)
-  order_over?: number;  // cents threshold
+  value: number;
+  order_over?: number;
   product?: number[];
   category?: number[];
   vendor?: number[];
 }
 
-// Individual discount-codes-pro entry
 export interface CCProCode {
   id: string;
   attributes: {
@@ -82,7 +196,7 @@ export interface CCProCode {
     code: string;
     name: string | null;
     active: number;
-    uses: number;                // redemption counter — key for auto-detection
+    uses: number;
     max_uses: number | null;
     maxused_user: number | null;
     only_customer: number;
@@ -94,7 +208,6 @@ export interface CCProCode {
   };
 }
 
-// Discount container (type: code-pro)
 export interface CCDiscount {
   id: string;
   attributes: {
@@ -117,69 +230,6 @@ export interface CCWebhook {
 }
 
 // ============================================================
-// Database row shapes (Supabase)
-// ============================================================
-export interface DbTier {
-  id: string;
-  name: string;
-  min_points: number;
-  cloudcart_group_id: number | null;
-  sort_order: number;
-  created_at: string;
-}
-
-export interface DbCustomer {
-  id: string;
-  cloudcart_id: number;
-  email: string;
-  first_name: string | null;
-  last_name: string | null;
-  points_balance: number;
-  tier_id: string | null;
-  promo_code: string | null;
-  promo_code_cloudcart_id: number | null;
-  created_at: string;
-  updated_at: string;
-  // joined
-  tiers?: DbTier;
-}
-
-export interface DbTransaction {
-  id: string;
-  customer_id: string;
-  cloudcart_order_id: number | null;
-  type: 'earn' | 'redeem' | 'adjust' | 'expire';
-  points: number;
-  order_value_cents: number | null;
-  description: string | null;
-  created_at: string;
-}
-
-export interface DbBonusRule {
-  id: string;
-  name: string;
-  description: string | null;
-  type: 'product_ids' | 'minimum_order' | 'multiplier' | 'flat_bonus';
-  config: Record<string, unknown>;
-  extra_points: number;
-  multiplier: number;
-  active: boolean;
-  valid_from: string | null;
-  valid_until: string | null;
-  created_at: string;
-}
-
-export interface DbSettings {
-  points_per_eur: number;
-  min_order_eur: number;
-  trigger_status: string;
-  points_to_eur_rate: number;
-  promo_code_prefix: string;
-  store_name: string;
-  loyalty_container_id: number | null;  // CloudCart discount container (code-pro type)
-}
-
-// ============================================================
 // Webhook payload from CloudCart
 // ============================================================
 export interface CCWebhookPayload {
@@ -188,4 +238,11 @@ export interface CCWebhookPayload {
     id: string;
     attributes: Record<string, unknown>;
   };
+}
+
+// ============================================================
+// Hono context variables (set by middleware)
+// ============================================================
+export interface AppVariables {
+  merchant: DbMerchant;
 }

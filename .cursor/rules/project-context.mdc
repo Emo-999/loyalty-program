@@ -1,0 +1,40 @@
+---
+description: Core project context for the CloudCart Loyalty Program
+alwaysApply: true
+---
+
+# CloudCart Loyalty Program — Project Context
+
+## What This Is
+Multi-tenant loyalty points CRM for CloudCart stores. Each merchant (CloudCart store) is a tenant with isolated data, webhook endpoint, dashboard login, and CloudCart API credentials.
+
+## Live Deployment
+- **Worker**: `https://loyalty-program.e-kurtisi.workers.dev`
+- **First merchant**: `smokezone` (slug used in all URLs)
+- **Dashboard**: `/admin` → login with slug + password → `/admin/:slug`
+
+## Tech Stack
+- **Runtime**: Cloudflare Workers
+- **Framework**: Hono v4 (TypeScript)
+- **Database**: Supabase (PostgreSQL + pgcrypto)
+- **Admin UI**: Alpine.js v3 + Tailwind CSS (CDN, inline in `src/ui/dashboard.ts`)
+- **Deploy**: `npx wrangler deploy`
+
+## Key Architecture Decisions
+- Every DB table has a `merchant_id` FK — always filter by it
+- CloudCart API client auto-appends `/api/v2` to stored base URLs
+- Alpine.js v3 is used — use `x-data="componentFn()"` pattern, NOT v2's `__x.$data`
+- Webhook auth: per-merchant `webhook_secret` checked via `X-Loyalty-Secret` header
+- Admin auth: Bearer token = `btoa(merchant_id:slug)`
+- Customer auth: HMAC token via query params `?email=X&token=Y`
+- Schema migration (`schema.sql`) is destructive — drops all tables before recreating
+
+## Secrets (Cloudflare Worker)
+- `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`, `SUPER_ADMIN_KEY`
+- All merchant-specific credentials live in the `merchants` DB table
+
+## Important: Shell is PowerShell
+This workspace runs on Windows with PowerShell. Use PowerShell syntax:
+- Use `Invoke-WebRequest` or `Invoke-RestMethod` instead of `curl -H`
+- Use semicolons `;` instead of `&&` to chain commands
+- No heredocs — use simple `-m "message"` for git commits

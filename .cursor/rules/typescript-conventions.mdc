@@ -1,0 +1,39 @@
+---
+description: TypeScript conventions for the loyalty program worker
+globs: src/**/*.ts
+alwaysApply: false
+---
+
+# TypeScript Conventions
+
+## Multi-Tenant Scoping
+Every database query MUST include `merchant_id` filtering:
+```typescript
+// Always scope by merchant
+const { data } = await db.from('loyalty_customers')
+  .select('*')
+  .eq('merchant_id', merchant.id);
+```
+
+## Hono Route Pattern
+Routes receive merchant context via `c.get('merchant')`:
+```typescript
+const merchant = c.get('merchant');  // DbMerchant from middleware
+const db = getSupabase(c.env);
+const cc = CloudCartClient.forMerchant(merchant);
+```
+
+## CloudCart API Client
+- Use `CloudCartClient.forMerchant(merchant)` — never construct manually
+- Base URL auto-appends `/api/v2`
+- All requests use JSON:API format (`data.type`, `data.attributes`)
+
+## Error Handling
+- CloudCart client throws on non-2xx — wrap in try/catch
+- Return `c.json({ error: message }, statusCode)` for API errors
+- Log with `console.error(\`[\${slug}] message\`)` for webhook debugging
+
+## Types
+- All DB row types are in `src/types.ts` (prefixed with `Db`)
+- CloudCart types are prefixed with `CC`
+- Env bindings type: `Env`, context variables: `AppVariables`

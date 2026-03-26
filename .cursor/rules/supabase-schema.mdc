@@ -1,0 +1,32 @@
+---
+description: Supabase schema conventions and migration patterns
+globs: supabase/**/*.sql
+alwaysApply: false
+---
+
+# Supabase Schema
+
+## Migration Pattern
+`schema.sql` is a full destructive migration — it DROPs all tables with CASCADE then recreates.
+- `DROP TABLE ... CASCADE` removes triggers and FK constraints automatically
+- Do NOT use `DROP TRIGGER ... ON table` after the table is dropped — PostgreSQL errors
+- Use `CREATE TABLE` (not `IF NOT EXISTS`) after dropping
+
+## Tables (all scoped by merchant_id)
+- `merchants` — one row per CloudCart store (parent table)
+- `settings` — key/value pairs per merchant (composite PK: merchant_id + key)
+- `tiers` — tier definitions with optional `cloudcart_group_id`
+- `reward_types` — discount configurations (flat/percent/shipping × target)
+- `loyalty_customers` — unique constraint on `(merchant_id, cloudcart_id)`
+- `points_transactions` — audit log (type: earn/redeem/adjust/expire)
+- `bonus_rules` — configurable rules with JSONB config
+- `processed_orders` — idempotency (composite PK: merchant_id + cloudcart_order_id)
+- `webhook_logs` — raw payloads for debugging
+
+## Trigger
+`trg_merchant_defaults` fires AFTER INSERT on `merchants` — auto-seeds default settings, tiers, and reward types for new merchants.
+
+## Password Functions
+- `hash_password(plain)` — bcrypt via pgcrypto
+- `verify_merchant_password(slug, password)` — checks against stored hash
+- `check_password(hash, plain)` — generic bcrypt verify

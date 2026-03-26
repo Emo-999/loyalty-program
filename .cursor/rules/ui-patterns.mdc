@@ -1,0 +1,29 @@
+---
+description: UI patterns for dashboard and customer-facing pages
+globs: src/ui/**/*.ts
+alwaysApply: false
+---
+
+# UI Patterns
+
+## Dashboard (Alpine.js v3)
+- HTML is exported as template literal strings from TypeScript files
+- Uses Alpine.js v3 from CDN — always use component function pattern:
+```javascript
+// Correct (v3)
+x-data="myComponent()"
+function myComponent() { return { prop: '', method() { ... } }; }
+
+// WRONG (v2 — will break)
+document.querySelector('[x-data]').__x.$data
+```
+- Tailwind CSS loaded from CDN (`cdn.tailwindcss.com`)
+- Dashboard state managed in `app()` function in `dashboard.ts`
+- API calls go through `this.api(method, path, body)` helper
+
+## Customer Pages
+- `customerPageHtml` — full BestSecret-style loyalty page
+- `widgetHtml` — compact embeddable iframe widget
+- Both fetch from `/c/:slug/api/me?email=X&token=Y`
+- Use vanilla JS (no framework) for customer-facing pages
+- Widget sends `postMessage({ type: 'loyalty-resize', height })` for iframe auto-resize

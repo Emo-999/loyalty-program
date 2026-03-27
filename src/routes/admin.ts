@@ -40,6 +40,49 @@ admin.patch('/settings', async (c) => {
 });
 
 // ============================================================
+// Change password (authenticated merchant)
+// ============================================================
+
+admin.patch('/password', async (c) => {
+  const merchant = c.get('merchant');
+  const db = getSupabase(c.env);
+  const { current_password, new_password } = await c.req.json<{ current_password: string; new_password: string }>();
+
+  if (!current_password || !new_password) {
+    return c.json({ error: 'Both current_password and new_password required' }, 400);
+  }
+  if (new_password.length < 8) {
+    return c.json({ error: 'New password must be at least 8 characters' }, 400);
+  }
+
+  const { data: match } = await db.rpc('verify_merchant_password', {
+    merchant_slug: merchant.slug,
+    plain_password: current_password,
+  });
+
+  if (!match) {
+    const { data: hashMatch } = await db.rpc('check_password', {
+      hashed: merchant.admin_password_hash ?? '',
+      plain: current_password,
+    });
+    if (!hashMatch) {
+      return c.json({ error: 'Current password is incorrect' }, 401);
+    }
+  }
+
+  const { data: newHash, error: hashErr } = await db.rpc('hash_password', { plain: new_password });
+  if (hashErr || !newHash) {
+    return c.json({ error: 'Password hashing failed' }, 500);
+  }
+
+  await db.from('merchants')
+    .update({ admin_password_hash: newHash, updated_at: new Date().toISOString() })
+    .eq('id', merchant.id);
+
+  return c.json({ ok: true });
+});
+
+// ============================================================
 // GraphQL PAT Token
 // ============================================================
 

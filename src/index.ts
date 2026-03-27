@@ -2,51 +2,12 @@ import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import type { Env, AppVariables } from './types';
 import { getSupabase, getMerchantBySlug } from './lib/supabase';
+import { signToken, verifyToken } from './lib/token';
 import webhookRouter from './routes/webhook';
 import adminRouter from './routes/admin';
 import setupRouter from './routes/setup';
 import customerRouter from './routes/customer';
-import { dashboardHtml, loginHtml } from './ui/dashboard';
-
-// HMAC-SHA256 signed tokens (no external JWT library needed)
-async function hmacKey(secret: string): Promise<CryptoKey> {
-  return crypto.subtle.importKey(
-    'raw', new TextEncoder().encode(secret),
-    { name: 'HMAC', hash: 'SHA-256' }, false, ['sign', 'verify'],
-  );
-}
-
-function b64url(buf: ArrayBuffer): string {
-  return btoa(String.fromCharCode(...new Uint8Array(buf)))
-    .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-}
-
-function b64urlDecode(s: string): string {
-  const padded = s.replace(/-/g, '+').replace(/_/g, '/') + '=='.slice(0, (4 - s.length % 4) % 4);
-  return atob(padded);
-}
-
-async function signToken(payload: Record<string, unknown>, secret: string): Promise<string> {
-  const json = JSON.stringify(payload);
-  const encoded = btoa(json).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-  const key = await hmacKey(secret);
-  const sig = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(encoded));
-  return encoded + '.' + b64url(sig);
-}
-
-async function verifyToken(token: string, secret: string): Promise<Record<string, unknown> | null> {
-  const parts = token.split('.');
-  if (parts.length !== 2) return null;
-  const [encoded, sig] = parts;
-  const key = await hmacKey(secret);
-  const sigBytes = Uint8Array.from(b64urlDecode(sig), c => c.charCodeAt(0));
-  const valid = await crypto.subtle.verify('HMAC', key, sigBytes, new TextEncoder().encode(encoded));
-  if (!valid) return null;
-  const json = b64urlDecode(encoded);
-  const payload = JSON.parse(json);
-  if (payload.exp && Date.now() / 1000 > payload.exp) return null;
-  return payload;
-}
+import { dashboardHtml, loginHtml, resetPasswordHtml } from './ui/dashboard';
 
 const app = new Hono<{ Bindings: Env; Variables: AppVariables }>();
 
@@ -171,6 +132,41 @@ app.use('/api/m/:slug/*', async (c, next) => {
   return next();
 });
 
+// ============================================================
+// Password reset — public endpoints
+// ============================================================
+app.get('/admin/reset-password', (c) => c.html(resetPasswordHtml));
+app.get('/admin/reset-password/', (c) => c.html(resetPasswordHtml));
+
+app.post('/api/reset-password', async (c) => {
+  const db = getSupabase(c.env);
+  const { token, new_password } = await c.req.json<{ token: string; new_password: string }>();
+
+  if (!token || !new_password) {
+    return c.json({ error: 'Token and new_password required' }, 400);
+  }
+  if (new_password.length < 8) {
+    return c.json({ error: 'Password must be at least 8 characters' }, 400);
+  }
+
+  const payload = await verifyToken(token, c.env.SUPER_ADMIN_KEY);
+  if (!payload || payload.purpose !== 'password_reset') {
+    return c.json({ error: 'Invalid or expired reset link' }, 401);
+  }
+
+  const { data: newHash, error: hashErr } = await db.rpc('hash_password', { plain: new_password });
+  if (hashErr || !newHash) {
+    return c.json({ error: 'Password hashing failed' }, 500);
+  }
+
+  const { error } = await db.from('merchants')
+    .update({ admin_password_hash: newHash })
+    .eq('id', payload.sub);
+
+  if (error) return c.json({ error: error.message }, 500);
+  return c.json({ ok: true });
+});
+
 // Serve merchant dashboard
 app.get('/admin', (c) => c.html(loginHtml));
 app.get('/admin/', (c) => c.html(loginHtml));
@@ -241,6 +237,35 @@ app.post('/api/super/merchants', async (c) => {
       `Webhook URL: /webhook/${merchant.slug}/cloudcart`,
     ],
   }, 201);
+});
+
+// Generate password reset link for a merchant (super-admin)
+app.post('/api/super/merchants/:slug/reset-password', async (c) => {
+  const superKey = c.req.header('X-Super-Admin-Key');
+  if (!superKey || superKey !== c.env.SUPER_ADMIN_KEY) {
+    return c.json({ error: 'Unauthorized' }, 401);
+  }
+
+  const db = getSupabase(c.env);
+  const slug = c.req.param('slug');
+  const merchant = await getMerchantBySlug(db, slug);
+  if (!merchant) return c.json({ error: 'Merchant not found' }, 404);
+
+  const now = Math.floor(Date.now() / 1000);
+  const resetToken = await signToken(
+    { sub: merchant.id, slug: merchant.slug, purpose: 'password_reset', iat: now, exp: now + 3600 },
+    c.env.SUPER_ADMIN_KEY,
+  );
+
+  const url = new URL(c.req.url);
+  const resetUrl = `${url.protocol}//${url.host}/admin/reset-password?token=${encodeURIComponent(resetToken)}`;
+
+  return c.json({
+    ok: true,
+    reset_url: resetUrl,
+    expires_in: '1 hour',
+    merchant: { slug: merchant.slug, admin_email: merchant.admin_email },
+  });
 });
 
 // List all merchants (super-admin)

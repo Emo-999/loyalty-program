@@ -41,6 +41,9 @@ export const loginHtml = /* html */ `<!DOCTYPE html>
         <span x-show="loading">Signing in…</span>
       </button>
     </form>
+    <p class="text-center mt-4 text-xs text-gray-400">
+      Forgot your password? <a href="/admin/reset-password" class="text-violet-600 hover:underline">Reset it here</a>
+    </p>
   </div>
 </div>
 
@@ -559,6 +562,32 @@ export const dashboardHtml = /* html */ `<!DOCTYPE html>
           </button>
         </div>
       </div>
+
+      <div class="bg-white rounded-xl shadow-sm border p-6 max-w-lg mt-6">
+        <h3 class="font-semibold mb-3 flex items-center gap-2">
+          <span class="text-violet-600">🔒</span> Change Password
+        </h3>
+        <div class="space-y-3">
+          <div>
+            <label class="block text-sm font-medium mb-1">Current Password</label>
+            <input x-model="pwCurrent" type="password" placeholder="Enter current password"
+              class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-violet-300" />
+          </div>
+          <div>
+            <label class="block text-sm font-medium mb-1">New Password</label>
+            <input x-model="pwNew" type="password" placeholder="Min 8 characters"
+              class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-violet-300" />
+          </div>
+          <div>
+            <label class="block text-sm font-medium mb-1">Confirm New Password</label>
+            <input x-model="pwConfirm" type="password" placeholder="Repeat new password"
+              class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-violet-300" />
+          </div>
+          <button @click="changePassword()" class="w-full bg-violet-600 text-white py-2 rounded-lg hover:bg-violet-700 text-sm font-medium">
+            Update Password
+          </button>
+        </div>
+      </div>
     </div>
 
   </main>
@@ -845,6 +874,9 @@ function app() {
     customerSearch: '',
     _bulkSyncing: false,
     patToken: '',
+    pwCurrent: '',
+    pwNew: '',
+    pwConfirm: '',
     toast: { msg: '', type: 'success' },
     modal: { open: false, customer: null, points: 0, description: '' },
     tierModal: { open: false, editing: false, form: {} },
@@ -934,6 +966,16 @@ function app() {
         await this.api('PATCH', '/pat-token', { cloudcart_pat_token: val });
         this.patToken = '••••••••';
         this.notify('PAT token saved — GraphQL API enabled');
+      } catch (e) { this.notify(e.message, 'error'); }
+    },
+    async changePassword() {
+      try {
+        if (!this.pwCurrent) { this.notify('Enter your current password', 'error'); return; }
+        if (this.pwNew.length < 8) { this.notify('New password must be at least 8 characters', 'error'); return; }
+        if (this.pwNew !== this.pwConfirm) { this.notify('Passwords do not match', 'error'); return; }
+        await this.api('PATCH', '/password', { current_password: this.pwCurrent, new_password: this.pwNew });
+        this.pwCurrent = ''; this.pwNew = ''; this.pwConfirm = '';
+        this.notify('Password updated successfully');
       } catch (e) { this.notify(e.message, 'error'); }
     },
 
@@ -1144,6 +1186,120 @@ function app() {
       localStorage.removeItem('loyalty_token');
       localStorage.removeItem('loyalty_slug');
       window.location.href = '/admin';
+    },
+  };
+}
+</script>
+</body>
+</html>`;
+
+// ============================================================
+// Reset Password page — served at /admin/reset-password
+// ============================================================
+export const resetPasswordHtml = /* html */ `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Loyalty Program — Reset Password</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+  <style>[x-cloak] { display: none !important; }</style>
+</head>
+<body class="bg-gradient-to-br from-violet-50 to-indigo-100 min-h-screen flex items-center justify-center">
+
+<div x-data="resetForm()" x-cloak class="w-full max-w-sm">
+  <div class="bg-white rounded-2xl shadow-xl p-8">
+    <div class="text-center mb-6">
+      <span class="text-4xl">🔑</span>
+      <h1 class="text-xl font-bold mt-2">Reset Password</h1>
+      <p class="text-sm text-gray-400 mt-1" x-text="hasToken ? 'Enter your new password' : 'Enter your store slug to request a reset'"></p>
+    </div>
+
+    <div x-show="message" class="text-sm px-3 py-2 rounded-lg mb-4"
+      :class="messageType === 'success' ? 'bg-green-50 text-green-600' : 'bg-red-50 text-red-600'"
+      x-text="message"></div>
+
+    <!-- Step 1: No token — show info -->
+    <template x-if="!hasToken && !done">
+      <div class="space-y-4">
+        <div class="bg-amber-50 border border-amber-200 rounded-lg p-4 text-sm text-amber-700">
+          <p class="font-medium mb-1">Need to reset your password?</p>
+          <p>Contact your system administrator. They can generate a password reset link for you.</p>
+        </div>
+        <a href="/admin" class="block text-center w-full bg-violet-600 text-white py-2.5 rounded-lg hover:bg-violet-700 text-sm font-medium">
+          Back to Login
+        </a>
+      </div>
+    </template>
+
+    <!-- Step 2: Has token — set new password -->
+    <template x-if="hasToken && !done">
+      <form @submit.prevent="submitReset()" class="space-y-4">
+        <div>
+          <label class="block text-sm font-medium mb-1">New Password</label>
+          <input x-model="newPassword" type="password" required minlength="8" placeholder="Min 8 characters"
+            class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-violet-300" />
+        </div>
+        <div>
+          <label class="block text-sm font-medium mb-1">Confirm Password</label>
+          <input x-model="confirmPassword" type="password" required minlength="8" placeholder="Repeat new password"
+            class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-violet-300" />
+        </div>
+        <button type="submit" :disabled="loading"
+          class="w-full bg-violet-600 text-white py-2.5 rounded-lg hover:bg-violet-700 text-sm font-medium disabled:opacity-50">
+          <span x-show="!loading">Set New Password</span>
+          <span x-show="loading">Updating…</span>
+        </button>
+      </form>
+    </template>
+
+    <!-- Step 3: Done -->
+    <template x-if="done">
+      <div class="space-y-4 text-center">
+        <div class="text-5xl">✅</div>
+        <p class="text-sm text-gray-600">Your password has been updated successfully.</p>
+        <a href="/admin" class="block w-full bg-violet-600 text-white py-2.5 rounded-lg hover:bg-violet-700 text-sm font-medium">
+          Sign In
+        </a>
+      </div>
+    </template>
+  </div>
+</div>
+
+<script>
+function resetForm() {
+  const params = new URLSearchParams(window.location.search);
+  return {
+    hasToken: !!params.get('token'),
+    token: params.get('token') || '',
+    newPassword: '',
+    confirmPassword: '',
+    loading: false,
+    done: false,
+    message: '',
+    messageType: 'error',
+    submitReset() {
+      this.message = '';
+      if (this.newPassword.length < 8) { this.message = 'Password must be at least 8 characters'; return; }
+      if (this.newPassword !== this.confirmPassword) { this.message = 'Passwords do not match'; return; }
+      this.loading = true;
+      fetch('/api/reset-password', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token: this.token, new_password: this.newPassword }),
+      })
+        .then(r => r.json())
+        .then(data => {
+          this.loading = false;
+          if (data.ok) {
+            this.done = true;
+          } else {
+            this.message = data.error || 'Reset failed';
+            this.messageType = 'error';
+          }
+        })
+        .catch(() => { this.loading = false; this.message = 'Network error'; });
     },
   };
 }

@@ -539,6 +539,26 @@ export const dashboardHtml = /* html */ `<!DOCTYPE html>
           </button>
         </div>
       </div>
+
+      <div class="bg-white rounded-xl shadow-sm border p-6 max-w-lg mt-6">
+        <h3 class="font-semibold mb-3 flex items-center gap-2">
+          <span class="text-violet-600">⚡</span> GraphQL API (Optional)
+        </h3>
+        <p class="text-xs text-gray-500 mb-3">Connect a CloudCart Personal Access Token to use the faster GraphQL API for syncing customers and orders. Generate one from your CloudCart admin → Settings → API Keys.</p>
+        <div class="space-y-3">
+          <div>
+            <label class="block text-sm font-medium mb-1">PAT Token</label>
+            <input x-model="patToken" type="password" placeholder="cc_pat_..."
+              class="w-full border rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-violet-300" />
+          </div>
+          <div class="flex items-center gap-2">
+            <span class="text-xs px-2 py-0.5 rounded-full" :class="patToken ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-500'" x-text="patToken ? '✓ Connected — using GraphQL' : 'Not set — using REST API'"></span>
+          </div>
+          <button @click="savePatToken()" class="w-full bg-violet-600 text-white py-2 rounded-lg hover:bg-violet-700 text-sm font-medium">
+            Save PAT Token
+          </button>
+        </div>
+      </div>
     </div>
 
   </main>
@@ -824,6 +844,7 @@ function app() {
     settings: {},
     customerSearch: '',
     _bulkSyncing: false,
+    patToken: '',
     toast: { msg: '', type: 'success' },
     modal: { open: false, customer: null, points: 0, description: '' },
     tierModal: { open: false, editing: false, form: {} },
@@ -836,15 +857,19 @@ function app() {
     issuedVouchers: [],
 
     async init() {
-      await Promise.all([
-        this.loadStats(),
-        this.loadSettings(),
-        this.loadCustomers(1),
-        this.loadTransactions(1),
-        this.loadTiers(),
-        this.loadRewards(),
-        this.loadRules(),
-      ]);
+      try {
+        await Promise.all([
+          this.loadStats(),
+          this.loadSettings(),
+          this.loadCustomers(1),
+          this.loadTransactions(1),
+          this.loadTiers(),
+          this.loadRewards(),
+          this.loadRules(),
+        ]);
+      } catch (e) {
+        console.error('Dashboard init error:', e);
+      }
     },
 
     notify(msg, type = 'success') {
@@ -868,7 +893,13 @@ function app() {
     },
 
     async loadStats() { this.stats = await this.api('GET', '/stats'); },
-    async loadSettings() { this.settings = await this.api('GET', '/settings'); },
+    async loadSettings() {
+      this.settings = await this.api('GET', '/settings');
+      try {
+        const pat = await this.api('GET', '/pat-status');
+        this.patToken = pat.has_token ? '••••••••' : '';
+      } catch { /* ignore if endpoint not yet deployed */ }
+    },
     async loadCustomers(page = 1) {
       const q = new URLSearchParams({ page, size: 20, search: this.customerSearch });
       const result = await this.api('GET', '/customers?' + q);
@@ -894,6 +925,15 @@ function app() {
       try {
         await this.api('PATCH', '/settings', this.settings);
         this.notify('Settings saved');
+      } catch (e) { this.notify(e.message, 'error'); }
+    },
+    async savePatToken() {
+      try {
+        const val = this.patToken.trim();
+        if (!val || val === '••••••••') { this.notify('Enter a PAT token first', 'error'); return; }
+        await this.api('PATCH', '/pat-token', { cloudcart_pat_token: val });
+        this.patToken = '••••••••';
+        this.notify('PAT token saved — GraphQL API enabled');
       } catch (e) { this.notify(e.message, 'error'); }
     },
 

@@ -26,6 +26,7 @@ CREATE TABLE merchants (
   store_name TEXT NOT NULL,
   cloudcart_base_url TEXT NOT NULL,       -- e.g. https://smokezone.cloudcart.net/api/v2
   cloudcart_api_key TEXT NOT NULL,        -- encrypted at rest by Supabase
+  cloudcart_pat_token TEXT,              -- GraphQL Admin API PAT (Bearer token)
   admin_email TEXT NOT NULL,
   admin_password_hash TEXT NOT NULL,      -- bcrypt hash
   webhook_secret TEXT NOT NULL,           -- per-merchant webhook validation

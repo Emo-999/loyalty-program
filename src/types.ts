@@ -16,6 +16,7 @@ export interface DbMerchant {
   store_name: string;
   cloudcart_base_url: string;
   cloudcart_api_key: string;
+  cloudcart_pat_token: string | null;
   admin_email: string;
   admin_password_hash: string;
   webhook_secret: string;

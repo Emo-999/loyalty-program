@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import type { Env, AppVariables } from '../types';
 import { getSupabase, loadSettings, saveSetting } from '../lib/supabase';
 import { CloudCartClient } from '../lib/cloudcart';
+import { CloudCartGqlClient } from '../lib/cloudcart-gql';
 import { buildCustomerNote, pointsToEur, getTierForPoints, processHistoricalOrders, assignEligibleRewards } from '../lib/points';
 import { generateCustomerToken } from './customer';
 
@@ -36,6 +37,28 @@ admin.patch('/settings', async (c) => {
   }
   const settings = await loadSettings(db, merchant.id);
   return c.json({ ...settings, store_name: body['store_name'] ?? merchant.store_name });
+});
+
+// ============================================================
+// GraphQL PAT Token
+// ============================================================
+
+admin.get('/pat-status', async (c) => {
+  const merchant = c.get('merchant');
+  return c.json({ has_token: !!merchant.cloudcart_pat_token });
+});
+
+admin.patch('/pat-token', async (c) => {
+  const merchant = c.get('merchant');
+  const db = getSupabase(c.env);
+  const { cloudcart_pat_token } = await c.req.json<{ cloudcart_pat_token: string }>();
+  if (!cloudcart_pat_token) return c.json({ error: 'Token required' }, 400);
+
+  await db.from('merchants')
+    .update({ cloudcart_pat_token, updated_at: new Date().toISOString() })
+    .eq('id', merchant.id);
+
+  return c.json({ ok: true });
 });
 
 // ============================================================
@@ -433,6 +456,7 @@ admin.post('/customers/:id/sync', async (c) => {
   const merchant = c.get('merchant');
   const db = getSupabase(c.env);
   const cc = CloudCartClient.forMerchant(merchant);
+  const gql = CloudCartGqlClient.forMerchant(merchant);
   const settings = await loadSettings(db, merchant.id);
 
   const { data: customer, error } = await db
@@ -461,7 +485,7 @@ admin.post('/customers/:id/sync', async (c) => {
     .order('sort_order', { ascending: true });
 
   const result = await processHistoricalOrders({
-    db, cc, merchant, settings,
+    db, cc, gql, merchant, settings,
     tiers: tiers ?? [],
     bonusRules: bonusRules ?? [],
     rewardTypes: rewardTypes ?? [],
@@ -479,7 +503,7 @@ admin.post('/customers/:id/sync', async (c) => {
   let rewardsIssued: string[] = [];
   try {
     const rw = await assignEligibleRewards({
-      db, cc, merchant,
+      db, cc, gql, merchant,
       customer: custForRewards,
       rewardTypes: rewardTypes ?? [],
     });
@@ -492,6 +516,7 @@ admin.post('/customers/:id/sync', async (c) => {
     points_awarded: result.pointsAwarded,
     new_balance: result.newBalance,
     rewards_issued: rewardsIssued,
+    api: gql ? 'graphql' : 'rest',
   });
 });
 

@@ -9,6 +9,7 @@ import type {
   CCProCondition,
 } from '../types';
 import { CloudCartClient } from './cloudcart';
+import type { CloudCartGqlClient, GqlOrder } from './cloudcart-gql';
 
 // ============================================================
 // Points calculation
@@ -235,11 +236,12 @@ export async function detectAndRecordRedemption(params: {
 export async function assignEligibleRewards(params: {
   db: SupabaseClient;
   cc: CloudCartClient;
+  gql?: CloudCartGqlClient | null;
   merchant: DbMerchant;
   customer: DbCustomer;
   rewardTypes: DbRewardType[];
 }): Promise<{ issued: string[]; errors: string[] }> {
-  const { db, cc, merchant, customer, rewardTypes } = params;
+  const { db, cc, gql, merchant, customer, rewardTypes } = params;
   const issued: string[] = [];
   const errors: string[] = [];
 
@@ -271,19 +273,31 @@ export async function assignEligibleRewards(params: {
     const conditions = buildConditionsForReward(reward);
 
     try {
-      const created = await cc.createProCode({
-        containerId: merchant.loyalty_container_id!,
-        code: codeStr,
-        name: `${reward.name} — ${customer.email}`,
-        conditions,
-      });
+      let createdId: number;
+      if (gql) {
+        const created = await gql.createCodeProCode({
+          discountId: merchant.loyalty_container_id!,
+          code: codeStr,
+          name: `${reward.name} — ${customer.email}`,
+          conditions,
+        });
+        createdId = Number(created.id);
+      } else {
+        const created = await cc.createProCode({
+          containerId: merchant.loyalty_container_id!,
+          code: codeStr,
+          name: `${reward.name} — ${customer.email}`,
+          conditions,
+        });
+        createdId = Number(created.id);
+      }
 
       const { error: insertErr } = await db.from('customer_rewards').insert({
         merchant_id: merchant.id,
         customer_id: customer.id,
         reward_type_id: reward.id,
         voucher_code: codeStr,
-        cloudcart_pro_code_id: Number(created.id),
+        cloudcart_pro_code_id: createdId,
         status: 'active',
       });
 
@@ -304,6 +318,7 @@ export async function assignEligibleRewards(params: {
 export async function processHistoricalOrders(params: {
   db: SupabaseClient;
   cc: CloudCartClient;
+  gql?: CloudCartGqlClient | null;
   merchant: DbMerchant;
   settings: DbSettings;
   tiers: DbTier[];
@@ -311,7 +326,7 @@ export async function processHistoricalOrders(params: {
   rewardTypes: DbRewardType[];
   customer: DbCustomer;
 }): Promise<{ ordersProcessed: number; pointsAwarded: number; newBalance: number }> {
-  const { db, cc, merchant, settings, tiers, bonusRules, rewardTypes, customer } = params;
+  const { db, cc, gql, merchant, settings, tiers, bonusRules, rewardTypes, customer } = params;
   const merchantId = merchant.id;
 
   const { data: alreadyProcessed } = await db
@@ -324,56 +339,65 @@ export async function processHistoricalOrders(params: {
     (alreadyProcessed ?? []).map((r) => r.cloudcart_order_id),
   );
 
-  let page = 1;
   let totalPointsAwarded = 0;
   let ordersProcessed = 0;
 
-  while (true) {
-    const res = await cc.listOrders(page, 50, settings.trigger_status, customer.cloudcart_id);
-    const orders = res.data;
-    if (!orders.length) break;
+  // Fetch orders via GraphQL (preferred) or REST fallback
+  const rawOrders: Array<{ id: number; price_total: number }> = [];
 
-    for (const order of orders) {
-      const orderId = Number(order.id);
-      if (processedSet.has(orderId)) continue;
-
-      const orderValueCents = order.attributes.price_total;
-      const orderEur = orderValueCents / 100;
-      const safetyCap = 500_000;
-      if (orderEur > safetyCap) continue;
-
-      const points = calculatePointsForOrder(orderValueCents, settings, bonusRules);
-      if (points <= 0) continue;
-
-      totalPointsAwarded += points;
-      ordersProcessed++;
-
-      await db.from('points_transactions').insert({
-        merchant_id: merchantId,
-        customer_id: customer.id,
-        cloudcart_order_id: orderId,
-        type: 'earn',
-        points,
-        order_value_cents: orderValueCents,
-        description: `Order #${orderId} — €${orderEur.toFixed(2)} (historical sync)`,
-      });
-
-      await db.from('processed_orders').insert({
-        merchant_id: merchantId,
-        cloudcart_order_id: orderId,
-        customer_id: customer.id,
-        points_awarded: points,
-      });
+  if (gql) {
+    const gqlOrders = await gql.fetchAllOrders(settings.trigger_status, String(customer.cloudcart_id));
+    for (const o of gqlOrders) {
+      rawOrders.push({ id: Number(o.id), price_total: o.price_total });
     }
+  } else {
+    let page = 1;
+    while (true) {
+      const res = await cc.listOrders(page, 50, settings.trigger_status, customer.cloudcart_id);
+      for (const o of res.data) {
+        rawOrders.push({ id: Number(o.id), price_total: o.attributes.price_total });
+      }
+      if (page >= res.meta.page['last-page']) break;
+      page++;
+    }
+  }
 
-    if (page >= res.meta.page['last-page']) break;
-    page++;
+  for (const order of rawOrders) {
+    if (processedSet.has(order.id)) continue;
+
+    const orderValueCents = order.price_total;
+    const orderEur = orderValueCents / 100;
+    const safetyCap = 500_000;
+    if (orderEur > safetyCap) continue;
+
+    const points = calculatePointsForOrder(orderValueCents, settings, bonusRules);
+    if (points <= 0) continue;
+
+    totalPointsAwarded += points;
+    ordersProcessed++;
+
+    await db.from('points_transactions').insert({
+      merchant_id: merchantId,
+      customer_id: customer.id,
+      cloudcart_order_id: order.id,
+      type: 'earn',
+      points,
+      order_value_cents: orderValueCents,
+      description: `Order #${order.id} — €${orderEur.toFixed(2)} (historical sync)`,
+    });
+
+    await db.from('processed_orders').insert({
+      merchant_id: merchantId,
+      cloudcart_order_id: order.id,
+      customer_id: customer.id,
+      points_awarded: points,
+    });
   }
 
   if (totalPointsAwarded === 0) {
     try {
       await assignEligibleRewards({
-        db, cc, merchant, customer, rewardTypes,
+        db, cc, gql, merchant, customer, rewardTypes,
       });
     } catch { /* best-effort */ }
     return { ordersProcessed: 0, pointsAwarded: 0, newBalance: customer.points_balance };
@@ -414,12 +438,16 @@ export async function processHistoricalOrders(params: {
   if (newTier?.cloudcart_group_id) ccAttrs.group_id = newTier.cloudcart_group_id;
 
   try {
-    await cc.updateCustomer(customer.cloudcart_id, ccAttrs);
+    if (gql) {
+      await gql.updateCustomer(customer.cloudcart_id, ccAttrs);
+    } else {
+      await cc.updateCustomer(customer.cloudcart_id, ccAttrs);
+    }
   } catch { /* best-effort CloudCart sync */ }
 
   try {
     await assignEligibleRewards({
-      db, cc, merchant,
+      db, cc, gql, merchant,
       customer: { ...customer, points_balance: newBalance },
       rewardTypes,
     });
@@ -435,6 +463,7 @@ export async function processHistoricalOrders(params: {
 export async function awardPoints(params: {
   db: SupabaseClient;
   cc: CloudCartClient;
+  gql?: CloudCartGqlClient | null;
   merchant: DbMerchant;
   settings: DbSettings;
   tiers: DbTier[];
@@ -448,7 +477,7 @@ export async function awardPoints(params: {
   customerLastName: string;
 }): Promise<{ points: number; newBalance: number }> {
   const {
-    db, cc, merchant, settings, tiers, bonusRules, rewardTypes,
+    db, cc, gql, merchant, settings, tiers, bonusRules, rewardTypes,
     cloudcartOrderId, cloudcartCustomerId, orderValueCents,
     customerEmail, customerFirstName, customerLastName,
   } = params;
@@ -566,11 +595,16 @@ export async function awardPoints(params: {
   const note = buildCustomerNote(newBalance, newTier, code, promoValueEur);
   const ccAttrs: Partial<{ note: string; group_id: number }> = { note };
   if (newTier?.cloudcart_group_id) ccAttrs.group_id = newTier.cloudcart_group_id;
-  await cc.updateCustomer(cloudcartCustomerId, ccAttrs);
+
+  if (gql) {
+    await gql.updateCustomer(cloudcartCustomerId, ccAttrs);
+  } else {
+    await cc.updateCustomer(cloudcartCustomerId, ccAttrs);
+  }
 
   try {
     await assignEligibleRewards({
-      db, cc, merchant,
+      db, cc, gql, merchant,
       customer: freshCustomer,
       rewardTypes,
     });

@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import type { Env } from '../types';
 import { getSupabase, getMerchantBySlug, loadSettings } from '../lib/supabase';
 import { CloudCartClient } from '../lib/cloudcart';
+import { CloudCartGqlClient } from '../lib/cloudcart-gql';
 import { awardPoints } from '../lib/points';
 
 const webhook = new Hono<{ Bindings: Env }>();
@@ -107,6 +108,7 @@ webhook.post('/:slug/cloudcart', async (c) => {
   }
 
   const cc = CloudCartClient.forMerchant(merchant);
+  const gql = CloudCartGqlClient.forMerchant(merchant);
   const settings = await loadSettings(db, merchant.id);
 
   if (order.orderStatus !== settings.trigger_status) {
@@ -135,7 +137,7 @@ webhook.post('/:slug/cloudcart', async (c) => {
 
   try {
     const { points, newBalance } = await awardPoints({
-      db, cc, merchant, settings,
+      db, cc, gql, merchant, settings,
       tiers: tiers ?? [],
       bonusRules: bonusRules ?? [],
       rewardTypes: rewardTypes ?? [],

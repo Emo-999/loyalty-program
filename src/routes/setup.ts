@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import type { Env, AppVariables } from '../types';
 import { getSupabase, loadSettings, saveSetting } from '../lib/supabase';
 import { CloudCartClient } from '../lib/cloudcart';
+import { CloudCartGqlClient } from '../lib/cloudcart-gql';
 import { processHistoricalOrders } from '../lib/points';
 
 const setup = new Hono<{ Bindings: Env; Variables: AppVariables }>();
@@ -116,6 +117,7 @@ setup.post('/sync-existing', async (c) => {
   const merchant = c.get('merchant');
   const db = getSupabase(c.env);
   const cc = CloudCartClient.forMerchant(merchant);
+  const gql = CloudCartGqlClient.forMerchant(merchant);
   const settings = await loadSettings(db, merchant.id);
 
   const { data: tiers } = await db
@@ -135,49 +137,91 @@ setup.post('/sync-existing', async (c) => {
     .eq('active', true)
     .order('sort_order', { ascending: true });
 
-  let page = 1;
   let imported = 0;
   let skipped = 0;
   let totalPointsAwarded = 0;
   let totalOrdersProcessed = 0;
+  const apiUsed = gql ? 'graphql' : 'rest';
 
-  while (true) {
-    const res = await cc.listCustomers(page, 50);
-    const customers = res.data;
-    if (!customers.length) break;
+  if (gql) {
+    let after: string | null = null;
+    let hasNext = true;
 
-    for (const cust of customers) {
-      const { data: upserted, error } = await db.from('loyalty_customers').upsert(
-        {
-          merchant_id: merchant.id,
-          cloudcart_id: Number(cust.id),
-          email: cust.attributes.email,
-          first_name: cust.attributes.first_name,
-          last_name: cust.attributes.last_name,
-        },
-        { onConflict: 'merchant_id,cloudcart_id' },
-      ).select('*, tiers(*)').single();
+    while (hasNext) {
+      const res = await gql.listCustomers(100, after);
+      for (const cust of res.customers) {
+        const { data: upserted, error } = await db.from('loyalty_customers').upsert(
+          {
+            merchant_id: merchant.id,
+            cloudcart_id: Number(cust.id),
+            email: cust.email,
+            first_name: cust.first_name,
+            last_name: cust.last_name,
+          },
+          { onConflict: 'merchant_id,cloudcart_id' },
+        ).select('*, tiers(*)').single();
 
-      if (error || !upserted) { skipped++; continue; }
-      imported++;
+        if (error || !upserted) { skipped++; continue; }
+        imported++;
 
-      try {
-        const result = await processHistoricalOrders({
-          db, cc, merchant, settings,
-          tiers: tiers ?? [],
-          bonusRules: bonusRules ?? [],
-          rewardTypes: rewardTypes ?? [],
-          customer: upserted,
-        });
-        totalPointsAwarded += result.pointsAwarded;
-        totalOrdersProcessed += result.ordersProcessed;
-      } catch (err) {
-        console.error(`[${merchant.slug}] Failed to process orders for customer #${cust.id}:`, err);
+        try {
+          const result = await processHistoricalOrders({
+            db, cc, gql, merchant, settings,
+            tiers: tiers ?? [],
+            bonusRules: bonusRules ?? [],
+            rewardTypes: rewardTypes ?? [],
+            customer: upserted,
+          });
+          totalPointsAwarded += result.pointsAwarded;
+          totalOrdersProcessed += result.ordersProcessed;
+        } catch (err) {
+          console.error(`[${merchant.slug}] Failed to process orders for customer #${cust.id}:`, err);
+        }
       }
-    }
 
-    if (page >= res.meta.page['last-page']) break;
-    page++;
+      hasNext = res.pageInfo.hasNextPage;
+      after = res.pageInfo.endCursor;
+    }
+  } else {
+    let page = 1;
+    while (true) {
+      const res = await cc.listCustomers(page, 50);
+      const customers = res.data;
+      if (!customers.length) break;
+
+      for (const cust of customers) {
+        const { data: upserted, error } = await db.from('loyalty_customers').upsert(
+          {
+            merchant_id: merchant.id,
+            cloudcart_id: Number(cust.id),
+            email: cust.attributes.email,
+            first_name: cust.attributes.first_name,
+            last_name: cust.attributes.last_name,
+          },
+          { onConflict: 'merchant_id,cloudcart_id' },
+        ).select('*, tiers(*)').single();
+
+        if (error || !upserted) { skipped++; continue; }
+        imported++;
+
+        try {
+          const result = await processHistoricalOrders({
+            db, cc, merchant, settings,
+            tiers: tiers ?? [],
+            bonusRules: bonusRules ?? [],
+            rewardTypes: rewardTypes ?? [],
+            customer: upserted,
+          });
+          totalPointsAwarded += result.pointsAwarded;
+          totalOrdersProcessed += result.ordersProcessed;
+        } catch (err) {
+          console.error(`[${merchant.slug}] Failed to process orders for customer #${cust.id}:`, err);
+        }
+      }
+
+      if (page >= res.meta.page['last-page']) break;
+      page++;
+    }
   }
 
   return c.json({
@@ -186,6 +230,7 @@ setup.post('/sync-existing', async (c) => {
     skipped,
     orders_processed: totalOrdersProcessed,
     points_awarded: totalPointsAwarded,
+    api: apiUsed,
   });
 });
 

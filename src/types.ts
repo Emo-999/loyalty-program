@@ -95,6 +95,21 @@ export interface DbCustomer {
 }
 
 // ============================================================
+// Customer rewards (issued voucher codes)
+// ============================================================
+export interface DbCustomerReward {
+  id: string;
+  merchant_id: string;
+  customer_id: string;
+  reward_type_id: string;
+  voucher_code: string;
+  cloudcart_pro_code_id: number | null;
+  status: 'active' | 'redeemed' | 'expired';
+  created_at: string;
+  reward_types?: DbRewardType;
+}
+
+// ============================================================
 // Transactions
 // ============================================================
 export interface DbTransaction {

@@ -93,6 +93,26 @@ export const dashboardHtml = /* html */ `<!DOCTYPE html>
   <style>
     [x-cloak] { display: none !important; }
     .tab-active { border-bottom: 2px solid #7c3aed; color: #6d28d9; font-weight: 600; }
+    @keyframes row-highlight {
+      0%   { background-color: #f5f3ff; }
+      30%  { background-color: #ede9fe; }
+      100% { background-color: transparent; }
+    }
+    @keyframes points-pop {
+      0%   { transform: scale(1); }
+      40%  { transform: scale(1.3); color: #16a34a; }
+      100% { transform: scale(1); }
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .row-synced { animation: row-highlight 2s ease-out; }
+    .points-updated { animation: points-pop 0.6s ease-out; }
+    .sync-spinner { animation: spin 0.8s linear infinite; display: inline-block; }
+    @keyframes badge-in {
+      0%   { transform: scale(0); opacity: 0; }
+      60%  { transform: scale(1.2); }
+      100% { transform: scale(1); opacity: 1; }
+    }
+    .badge-pop { animation: badge-in 0.4s ease-out; }
   </style>
 </head>
 <body class="bg-gray-50 text-gray-800 font-sans">
@@ -113,8 +133,11 @@ export const dashboardHtml = /* html */ `<!DOCTYPE html>
         <button @click="runSetup()" class="text-xs bg-violet-600 text-white px-3 py-1.5 rounded-lg hover:bg-violet-700">
           ⚙️ Run Setup
         </button>
-        <button @click="syncExisting()" class="text-xs bg-gray-100 px-3 py-1.5 rounded-lg hover:bg-gray-200">
-          🔄 Sync Customers
+        <button @click="syncExisting()" :disabled="_bulkSyncing"
+          class="text-xs bg-gray-100 px-3 py-1.5 rounded-lg hover:bg-gray-200 disabled:opacity-50 disabled:cursor-wait">
+          <span x-show="!_bulkSyncing">🔄 Sync Customers</span>
+          <span x-show="_bulkSyncing" class="sync-spinner">↻</span>
+          <span x-show="_bulkSyncing"> Syncing…</span>
         </button>
         <button @click="logout()" class="text-xs bg-red-50 text-red-600 px-3 py-1.5 rounded-lg hover:bg-red-100">
           Logout
@@ -219,18 +242,23 @@ export const dashboardHtml = /* html */ `<!DOCTYPE html>
           </thead>
           <tbody>
             <template x-for="cust in customers.data" :key="cust.id">
-              <tr class="border-t hover:bg-gray-50">
+              <tr class="border-t hover:bg-gray-50 transition-colors" :id="'cust-row-' + cust.id">
                 <td class="px-4 py-3">
                   <p class="font-medium" x-text="(cust.first_name ?? '') + ' ' + (cust.last_name ?? '')"></p>
                   <p class="text-xs text-gray-400" x-text="cust.email"></p>
                 </td>
-                <td class="px-4 py-3 text-right font-semibold text-violet-600"
-                  x-text="(cust.points_balance ?? 0).toLocaleString()"></td>
+                <td class="px-4 py-3 text-right">
+                  <span class="font-semibold text-violet-600 inline-block" :id="'pts-' + cust.id"
+                    x-text="(cust.points_balance ?? 0).toLocaleString()"></span>
+                  <div x-show="cust._pointsDelta > 0" x-transition class="text-xs text-green-600 font-medium mt-0.5"
+                    x-text="'+' + (cust._pointsDelta ?? 0).toLocaleString() + ' pts'"></div>
+                </td>
                 <td class="px-4 py-3 text-right text-xs text-gray-400"
                   x-text="(cust.lifetime_points ?? 0).toLocaleString()"></td>
                 <td class="px-4 py-3 text-center">
                   <span x-show="cust.tiers"
                     class="text-xs px-2 py-0.5 rounded-full bg-violet-100 text-violet-700 font-medium"
+                    :class="cust._tierJustChanged ? 'badge-pop' : ''"
                     x-text="cust.tiers?.name"></span>
                   <span x-show="!cust.tiers" class="text-gray-300 text-xs">—</span>
                 </td>
@@ -238,11 +266,23 @@ export const dashboardHtml = /* html */ `<!DOCTYPE html>
                 <td class="px-4 py-3 text-center text-sm font-semibold text-green-600"
                   x-text="'€' + Math.floor((cust.points_balance ?? 0) / settings.points_to_eur_rate)">
                 </td>
-                <td class="px-4 py-3 text-center">
+                <td class="px-4 py-3 text-center whitespace-nowrap">
                   <button @click="openAdjust(cust)"
                     class="text-xs bg-violet-50 text-violet-700 px-2 py-1 rounded hover:bg-violet-100 mr-1">Adjust</button>
-                  <button @click="syncCustomer(cust)"
-                    class="text-xs bg-gray-50 text-gray-600 px-2 py-1 rounded hover:bg-gray-100">Sync</button>
+                  <button @click="openVouchers(cust)"
+                    class="text-xs bg-amber-50 text-amber-700 px-2 py-1 rounded hover:bg-amber-100 mr-1">Vouchers</button>
+                  <button @click="syncCustomer(cust)" :disabled="cust._syncing"
+                    class="text-xs px-2 py-1 rounded transition-all"
+                    :class="cust._syncing
+                      ? 'bg-violet-100 text-violet-500 cursor-wait'
+                      : cust._syncDone
+                        ? 'bg-green-100 text-green-700'
+                        : 'bg-gray-50 text-gray-600 hover:bg-gray-100'">
+                    <span x-show="cust._syncing" class="sync-spinner">↻</span>
+                    <span x-show="cust._syncing"> Syncing…</span>
+                    <span x-show="!cust._syncing && cust._syncDone">✓ Synced</span>
+                    <span x-show="!cust._syncing && !cust._syncDone">Sync</span>
+                  </button>
                 </td>
               </tr>
             </template>
@@ -372,12 +412,49 @@ export const dashboardHtml = /* html */ `<!DOCTYPE html>
               </div>
               <div class="flex gap-2 ml-4 shrink-0">
                 <button @click="openRewardForm(rw)" class="text-xs bg-gray-100 px-2 py-1 rounded hover:bg-gray-200">Edit</button>
-                <button @click="deleteReward(rw.id)" class="text-xs bg-red-50 text-red-600 px-2 py-1 rounded hover:bg-red-100">Del</button>
+                <button @click="deleteReward(rw.id)" class="text-xs bg-red-50 text-red-600 px-2 py-1 rounded hover:bg-red-100">Delete</button>
               </div>
             </div>
           </div>
         </template>
         <p x-show="!rewards.length" class="text-center text-gray-400 text-sm py-8">No reward types configured</p>
+      </div>
+
+      <div class="mt-8">
+        <h3 class="text-md font-semibold mb-3">Issued Vouchers</h3>
+        <div class="bg-white rounded-xl shadow-sm border overflow-hidden">
+          <table class="w-full text-sm">
+            <thead class="bg-gray-50 text-xs text-gray-500 uppercase tracking-wide">
+              <tr>
+                <th class="px-4 py-3 text-left">Customer</th>
+                <th class="px-4 py-3 text-left">Reward</th>
+                <th class="px-4 py-3 text-center">Voucher Code</th>
+                <th class="px-4 py-3 text-center">Status</th>
+                <th class="px-4 py-3 text-left">Issued</th>
+              </tr>
+            </thead>
+            <tbody>
+              <template x-for="iv in issuedVouchers" :key="iv.id">
+                <tr class="border-t hover:bg-gray-50">
+                  <td class="px-4 py-2 text-xs" x-text="iv.loyalty_customers?.email ?? '—'"></td>
+                  <td class="px-4 py-2 text-xs font-medium" x-text="iv.reward_types?.name ?? '—'"></td>
+                  <td class="px-4 py-2 text-center text-xs font-mono text-violet-600" x-text="iv.voucher_code"></td>
+                  <td class="px-4 py-2 text-center">
+                    <span :class="{
+                      'bg-green-100 text-green-700': iv.status === 'active',
+                      'bg-blue-100 text-blue-700': iv.status === 'redeemed',
+                      'bg-gray-100 text-gray-500': iv.status === 'expired',
+                    }" class="text-xs px-2 py-0.5 rounded-full font-medium" x-text="iv.status"></span>
+                  </td>
+                  <td class="px-4 py-2 text-xs text-gray-400" x-text="new Date(iv.created_at).toLocaleDateString()"></td>
+                </tr>
+              </template>
+              <tr x-show="!issuedVouchers?.length">
+                <td colspan="5" class="px-4 py-6 text-center text-gray-400 text-sm">No vouchers issued yet. Vouchers are auto-assigned when customers reach the required points.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
       </div>
     </div>
 
@@ -674,6 +751,45 @@ export const dashboardHtml = /* html */ `<!DOCTYPE html>
     </div>
   </div>
 
+  <!-- ===== MODAL: Customer Vouchers ===== -->
+  <div x-show="voucherModal.open" x-transition class="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
+    <div class="bg-white rounded-2xl shadow-xl p-6 w-full max-w-lg" @click.stop>
+      <div class="flex items-center justify-between mb-4">
+        <div>
+          <h3 class="font-semibold text-lg">Voucher Codes</h3>
+          <p class="text-sm text-gray-400" x-text="voucherModal.customer?.email"></p>
+        </div>
+        <button @click="voucherModal.open = false" class="text-gray-400 hover:text-gray-600 text-xl">&times;</button>
+      </div>
+      <div class="space-y-2">
+        <template x-for="v in voucherModal.vouchers" :key="v.id">
+          <div class="flex items-center justify-between bg-gray-50 rounded-lg px-4 py-3">
+            <div>
+              <p class="text-sm font-medium" x-text="v.reward_types?.name ?? 'Reward'"></p>
+              <p class="text-xs text-gray-400 mt-0.5">
+                <span x-text="v.reward_types?.discount_method?.toUpperCase()"></span>
+                <span x-show="v.reward_types?.discount_value"> ·
+                  <span x-text="v.reward_types?.discount_method === 'percent'
+                    ? (v.reward_types.discount_value/100).toFixed(0) + '%'
+                    : '€' + (v.reward_types.discount_value/100).toFixed(2)"></span>
+                </span>
+              </p>
+            </div>
+            <div class="text-right">
+              <p class="font-mono text-sm text-violet-600 font-semibold" x-text="v.voucher_code"></p>
+              <span :class="{
+                'bg-green-100 text-green-700': v.status === 'active',
+                'bg-blue-100 text-blue-700': v.status === 'redeemed',
+                'bg-gray-100 text-gray-500': v.status === 'expired',
+              }" class="text-xs px-2 py-0.5 rounded-full font-medium" x-text="v.status"></span>
+            </div>
+          </div>
+        </template>
+        <p x-show="!voucherModal.vouchers?.length" class="text-center text-gray-400 text-sm py-6">No vouchers issued yet</p>
+      </div>
+    </div>
+  </div>
+
 </div>
 
 <script>
@@ -707,6 +823,7 @@ function app() {
     rules: [],
     settings: {},
     customerSearch: '',
+    _bulkSyncing: false,
     toast: { msg: '', type: 'success' },
     modal: { open: false, customer: null, points: 0, description: '' },
     tierModal: { open: false, editing: false, form: {} },
@@ -715,6 +832,8 @@ function app() {
       productIdsStr: '', categoryIdsStr: '', vendorIdsStr: '',
     },
     ruleModal: { open: false, editing: false, form: {}, productIds: '', minOrderEur: 0 },
+    voucherModal: { open: false, customer: null, vouchers: [] },
+    issuedVouchers: [],
 
     async init() {
       await Promise.all([
@@ -730,7 +849,7 @@ function app() {
 
     notify(msg, type = 'success') {
       this.toast = { msg, type };
-      setTimeout(() => this.toast.msg = '', 3500);
+      setTimeout(() => this.toast.msg = '', type === 'error' ? 5000 : 4000);
     },
 
     async api(method, path, body) {
@@ -752,13 +871,23 @@ function app() {
     async loadSettings() { this.settings = await this.api('GET', '/settings'); },
     async loadCustomers(page = 1) {
       const q = new URLSearchParams({ page, size: 20, search: this.customerSearch });
-      this.customers = await this.api('GET', '/customers?' + q);
+      const result = await this.api('GET', '/customers?' + q);
+      for (const c of (result.data ?? [])) {
+        c._syncing = false;
+        c._syncDone = false;
+        c._pointsDelta = 0;
+        c._tierJustChanged = false;
+      }
+      this.customers = result;
     },
     async loadTransactions(page = 1) {
       this.transactions = await this.api('GET', '/transactions?page=' + page + '&size=30');
     },
     async loadTiers() { this.tiers = await this.api('GET', '/tiers'); },
-    async loadRewards() { this.rewards = await this.api('GET', '/rewards'); },
+    async loadRewards() {
+      this.rewards = await this.api('GET', '/rewards');
+      try { this.issuedVouchers = await this.api('GET', '/rewards/issued'); } catch { this.issuedVouchers = []; }
+    },
     async loadRules() { this.rules = await this.api('GET', '/rules'); },
 
     async saveSettings() {
@@ -780,8 +909,76 @@ function app() {
       } catch (e) { this.notify(e.message, 'error'); }
     },
     async syncCustomer(cust) {
-      try { await this.api('POST', '/customers/' + cust.id + '/sync'); this.notify('Synced'); }
-      catch (e) { this.notify(e.message, 'error'); }
+      if (cust._syncing) return;
+      cust._syncing = true;
+      cust._syncDone = false;
+      cust._pointsDelta = 0;
+      cust._tierJustChanged = false;
+      try {
+        const r = await this.api('POST', '/customers/' + cust.id + '/sync');
+        if (!r) return;
+
+        const awarded = r.points_awarded ?? 0;
+        const oldBalance = cust.points_balance ?? 0;
+        const oldTier = cust.tiers?.name ?? null;
+
+        const updated = await this.api('GET', '/customers/' + cust.id);
+        if (!updated) return;
+
+        if (awarded > 0) {
+          cust._pointsDelta = awarded;
+          const newBal = r.new_balance ?? updated.points_balance ?? oldBalance;
+          this.animateCount(cust, 'points_balance', oldBalance, newBal, 800);
+          cust.lifetime_points = updated.lifetime_points ?? (oldBalance + awarded);
+        } else {
+          cust.points_balance = updated.points_balance ?? cust.points_balance;
+          cust.lifetime_points = updated.lifetime_points ?? cust.lifetime_points;
+        }
+
+        if (updated.tiers?.name && updated.tiers.name !== oldTier) cust._tierJustChanged = true;
+        cust.tiers = updated.tiers ?? null;
+        cust.tier_id = updated.tier_id ?? null;
+        cust.promo_code = updated.promo_code ?? cust.promo_code;
+        cust.promo_code_cloudcart_id = updated.promo_code_cloudcart_id ?? cust.promo_code_cloudcart_id;
+
+        this.$nextTick(() => {
+          const row = document.getElementById('cust-row-' + cust.id);
+          if (row) { row.classList.remove('row-synced'); void row.offsetWidth; row.classList.add('row-synced'); }
+          const ptsEl = document.getElementById('pts-' + cust.id);
+          if (ptsEl && awarded > 0) { ptsEl.classList.remove('points-updated'); void ptsEl.offsetWidth; ptsEl.classList.add('points-updated'); }
+        });
+
+        cust._syncDone = true;
+        const msg = awarded > 0
+          ? '+' + awarded.toLocaleString() + ' pts from ' + (r.orders_processed ?? 0) + ' order(s)' + (cust.tiers ? ' \\u00B7 ' + cust.tiers.name : '')
+          : 'Already up to date \\u2014 no new orders';
+        this.notify(msg);
+
+        setTimeout(() => { cust._pointsDelta = 0; cust._syncDone = false; cust._tierJustChanged = false; }, 5000);
+        this.loadStats();
+      } catch (e) {
+        this.notify(e.message || 'Sync failed', 'error');
+      } finally {
+        cust._syncing = false;
+      }
+    },
+
+    async openVouchers(cust) {
+      this.voucherModal = { open: true, customer: cust, vouchers: [] };
+      try {
+        this.voucherModal.vouchers = await this.api('GET', '/customers/' + cust.id + '/rewards');
+      } catch { this.voucherModal.vouchers = []; }
+    },
+
+    animateCount(obj, prop, from, to, duration) {
+      const start = performance.now();
+      const step = (now) => {
+        const progress = Math.min((now - start) / duration, 1);
+        const eased = 1 - Math.pow(1 - progress, 3);
+        obj[prop] = Math.round(from + (to - from) * eased);
+        if (progress < 1) requestAnimationFrame(step);
+      };
+      requestAnimationFrame(step);
     },
 
     openTierForm(tier) {
@@ -884,17 +1081,23 @@ function app() {
       } catch (e) { this.notify(e.message, 'error'); }
     },
     async syncExisting() {
-      if (!confirm('Import all CloudCart customers into loyalty DB?')) return;
+      if (!confirm('Import all CloudCart customers and sync their order history?\\nThis may take a moment for stores with many customers.')) return;
+      this._bulkSyncing = true;
+      this.notify('Syncing all customers — this may take a moment…');
       try {
         const r = await fetch('/api/m/' + this.slug + '/setup/sync-existing', {
           method: 'POST',
           headers: { 'Authorization': 'Bearer ' + this.token },
         });
         const data = await r.json();
-        this.notify('Imported ' + data.imported + ' customers');
+        const parts = [data.imported + ' customer(s) synced'];
+        if (data.orders_processed > 0) parts.push(data.orders_processed + ' order(s) processed');
+        if (data.points_awarded > 0) parts.push('+' + data.points_awarded.toLocaleString() + ' pts awarded');
+        this.notify(parts.join(' · '));
         await this.loadCustomers(1);
         await this.loadStats();
       } catch (e) { this.notify(e.message, 'error'); }
+      finally { this._bulkSyncing = false; }
     },
 
     logout() {

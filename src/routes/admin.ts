@@ -2,7 +2,7 @@ import { Hono } from 'hono';
 import type { Env, AppVariables } from '../types';
 import { getSupabase, loadSettings, saveSetting } from '../lib/supabase';
 import { CloudCartClient } from '../lib/cloudcart';
-import { buildCustomerNote, pointsToEur, getTierForPoints } from '../lib/points';
+import { buildCustomerNote, pointsToEur, getTierForPoints, processHistoricalOrders, assignEligibleRewards } from '../lib/points';
 import { generateCustomerToken } from './customer';
 
 const admin = new Hono<{ Bindings: Env; Variables: AppVariables }>();
@@ -426,7 +426,7 @@ admin.get('/stats', async (c) => {
 });
 
 // ============================================================
-// Re-sync a single customer to CloudCart
+// Re-sync a single customer: pull orders from CloudCart → recalculate points
 // ============================================================
 
 admin.post('/customers/:id/sync', async (c) => {
@@ -443,15 +443,56 @@ admin.post('/customers/:id/sync', async (c) => {
     .single();
   if (error) return c.json({ error: 'Not found' }, 404);
 
-  const promoValueEur = pointsToEur(customer.points_balance, settings.points_to_eur_rate);
-  const tier = customer.tiers ?? null;
-  const note = buildCustomerNote(customer.points_balance, tier, customer.promo_code, promoValueEur);
+  const { data: tiers } = await db
+    .from('tiers')
+    .select('*')
+    .eq('merchant_id', merchant.id)
+    .order('sort_order', { ascending: true });
+  const { data: bonusRules } = await db
+    .from('bonus_rules')
+    .select('*')
+    .eq('merchant_id', merchant.id)
+    .eq('active', true);
+  const { data: rewardTypes } = await db
+    .from('reward_types')
+    .select('*')
+    .eq('merchant_id', merchant.id)
+    .eq('active', true)
+    .order('sort_order', { ascending: true });
 
-  const attrs: Record<string, unknown> = { note };
-  if (tier?.cloudcart_group_id) attrs['group_id'] = tier.cloudcart_group_id;
-  await cc.updateCustomer(customer.cloudcart_id, attrs as Parameters<typeof cc.updateCustomer>[1]);
+  const result = await processHistoricalOrders({
+    db, cc, merchant, settings,
+    tiers: tiers ?? [],
+    bonusRules: bonusRules ?? [],
+    rewardTypes: rewardTypes ?? [],
+    customer,
+  });
 
-  return c.json({ ok: true });
+  const freshCustomer = await db
+    .from('loyalty_customers')
+    .select('*, tiers(*)')
+    .eq('id', c.req.param('id'))
+    .eq('merchant_id', merchant.id)
+    .single();
+
+  const custForRewards = freshCustomer.data ?? customer;
+  let rewardsIssued: string[] = [];
+  try {
+    const rw = await assignEligibleRewards({
+      db, cc, merchant,
+      customer: custForRewards,
+      rewardTypes: rewardTypes ?? [],
+    });
+    rewardsIssued = rw.issued;
+  } catch { /* best-effort */ }
+
+  return c.json({
+    ok: true,
+    orders_processed: result.ordersProcessed,
+    points_awarded: result.pointsAwarded,
+    new_balance: result.newBalance,
+    rewards_issued: rewardsIssued,
+  });
 });
 
 // ============================================================
@@ -471,6 +512,36 @@ admin.get('/customers/:id/token', async (c) => {
 
   const token = await generateCustomerToken(customer.email, merchant.webhook_secret);
   return c.json({ email: customer.email, token });
+});
+
+// ============================================================
+// Customer rewards (issued vouchers)
+// ============================================================
+
+admin.get('/customers/:id/rewards', async (c) => {
+  const merchant = c.get('merchant');
+  const db = getSupabase(c.env);
+  const { data, error } = await db
+    .from('customer_rewards')
+    .select('*, reward_types(id, name, discount_method, discount_target, discount_value)')
+    .eq('merchant_id', merchant.id)
+    .eq('customer_id', c.req.param('id'))
+    .order('created_at', { ascending: false });
+  if (error) return c.json({ error: error.message }, 500);
+  return c.json(data);
+});
+
+admin.get('/rewards/issued', async (c) => {
+  const merchant = c.get('merchant');
+  const db = getSupabase(c.env);
+  const { data, error } = await db
+    .from('customer_rewards')
+    .select('*, reward_types(id, name), loyalty_customers(id, email, first_name, last_name)')
+    .eq('merchant_id', merchant.id)
+    .order('created_at', { ascending: false })
+    .limit(100);
+  if (error) return c.json({ error: error.message }, 500);
+  return c.json(data);
 });
 
 // Generate embed snippet for the merchant

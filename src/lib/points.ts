@@ -94,7 +94,8 @@ export function buildConditionsForReward(
   reward: DbRewardType,
   valueCentsOverride?: number,
 ): CCProCondition[] {
-  const value = valueCentsOverride ?? reward.discount_value;
+  const rawValue = valueCentsOverride ?? reward.discount_value;
+  const value = Math.max(rawValue, 1);
   const condition: CCProCondition = {
     type: reward.discount_method,
     setting: reward.discount_target,
@@ -225,6 +226,206 @@ export async function detectAndRecordRedemption(params: {
   });
 
   return pointsRedeemed;
+}
+
+// ============================================================
+// Auto-assign eligible reward vouchers to a customer
+// ============================================================
+
+export async function assignEligibleRewards(params: {
+  db: SupabaseClient;
+  cc: CloudCartClient;
+  merchant: DbMerchant;
+  customer: DbCustomer;
+  rewardTypes: DbRewardType[];
+}): Promise<{ issued: string[]; errors: string[] }> {
+  const { db, cc, merchant, customer, rewardTypes } = params;
+  const issued: string[] = [];
+  const errors: string[] = [];
+
+  if (!merchant.loyalty_container_id) return { issued, errors: ['no container_id'] };
+
+  const eligibleRewards = rewardTypes.filter(
+    (r) => r.active && r.min_points_cost > 0 && customer.points_balance >= r.min_points_cost,
+  );
+
+  if (!eligibleRewards.length) return { issued, errors: ['no eligible rewards'] };
+
+  const { data: existingRewards, error: existErr } = await db
+    .from('customer_rewards')
+    .select('reward_type_id')
+    .eq('customer_id', customer.id);
+
+  if (existErr) {
+    return { issued, errors: [`DB query failed: ${existErr.message}`] };
+  }
+
+  const alreadyIssued = new Set(
+    (existingRewards ?? []).map((r) => r.reward_type_id),
+  );
+
+  for (const reward of eligibleRewards) {
+    if (alreadyIssued.has(reward.id)) { errors.push(`${reward.name}: already issued`); continue; }
+
+    const codeStr = `${reward.name.replace(/[^a-zA-Z0-9]/g, '').toUpperCase().slice(0, 10)}${customer.cloudcart_id}`;
+    const conditions = buildConditionsForReward(reward);
+
+    try {
+      const created = await cc.createProCode({
+        containerId: merchant.loyalty_container_id!,
+        code: codeStr,
+        name: `${reward.name} — ${customer.email}`,
+        conditions,
+      });
+
+      const { error: insertErr } = await db.from('customer_rewards').insert({
+        merchant_id: merchant.id,
+        customer_id: customer.id,
+        reward_type_id: reward.id,
+        voucher_code: codeStr,
+        cloudcart_pro_code_id: Number(created.id),
+        status: 'active',
+      });
+
+      if (insertErr) { errors.push(`${reward.name}: DB insert failed — ${insertErr.message}`); continue; }
+      issued.push(codeStr);
+    } catch (err) {
+      errors.push(`${reward.name}: ${String(err)}`);
+    }
+  }
+
+  return { issued, errors };
+}
+
+// ============================================================
+// Process historical orders for a customer (used by sync)
+// ============================================================
+
+export async function processHistoricalOrders(params: {
+  db: SupabaseClient;
+  cc: CloudCartClient;
+  merchant: DbMerchant;
+  settings: DbSettings;
+  tiers: DbTier[];
+  bonusRules: DbBonusRule[];
+  rewardTypes: DbRewardType[];
+  customer: DbCustomer;
+}): Promise<{ ordersProcessed: number; pointsAwarded: number; newBalance: number }> {
+  const { db, cc, merchant, settings, tiers, bonusRules, rewardTypes, customer } = params;
+  const merchantId = merchant.id;
+
+  const { data: alreadyProcessed } = await db
+    .from('processed_orders')
+    .select('cloudcart_order_id')
+    .eq('merchant_id', merchantId)
+    .eq('customer_id', customer.id);
+
+  const processedSet = new Set(
+    (alreadyProcessed ?? []).map((r) => r.cloudcart_order_id),
+  );
+
+  let page = 1;
+  let totalPointsAwarded = 0;
+  let ordersProcessed = 0;
+
+  while (true) {
+    const res = await cc.listOrders(page, 50, settings.trigger_status, customer.cloudcart_id);
+    const orders = res.data;
+    if (!orders.length) break;
+
+    for (const order of orders) {
+      const orderId = Number(order.id);
+      if (processedSet.has(orderId)) continue;
+
+      const orderValueCents = order.attributes.price_total;
+      const orderEur = orderValueCents / 100;
+      const safetyCap = 500_000;
+      if (orderEur > safetyCap) continue;
+
+      const points = calculatePointsForOrder(orderValueCents, settings, bonusRules);
+      if (points <= 0) continue;
+
+      totalPointsAwarded += points;
+      ordersProcessed++;
+
+      await db.from('points_transactions').insert({
+        merchant_id: merchantId,
+        customer_id: customer.id,
+        cloudcart_order_id: orderId,
+        type: 'earn',
+        points,
+        order_value_cents: orderValueCents,
+        description: `Order #${orderId} — €${orderEur.toFixed(2)} (historical sync)`,
+      });
+
+      await db.from('processed_orders').insert({
+        merchant_id: merchantId,
+        cloudcart_order_id: orderId,
+        customer_id: customer.id,
+        points_awarded: points,
+      });
+    }
+
+    if (page >= res.meta.page['last-page']) break;
+    page++;
+  }
+
+  if (totalPointsAwarded === 0) {
+    try {
+      await assignEligibleRewards({
+        db, cc, merchant, customer, rewardTypes,
+      });
+    } catch { /* best-effort */ }
+    return { ordersProcessed: 0, pointsAwarded: 0, newBalance: customer.points_balance };
+  }
+
+  const newBalance = customer.points_balance + totalPointsAwarded;
+  const newLifetime = (customer.lifetime_points ?? 0) + totalPointsAwarded;
+  const newTier = getTierForPoints(newBalance, tiers);
+
+  await db
+    .from('loyalty_customers')
+    .update({
+      points_balance: newBalance,
+      lifetime_points: newLifetime,
+      tier_id: newTier?.id ?? null,
+      updated_at: new Date().toISOString(),
+    })
+    .eq('id', customer.id);
+
+  const promoValueCents = pointsToEur(newBalance, settings.points_to_eur_rate) * 100;
+  if (merchant.loyalty_container_id && promoValueCents > 0) {
+    try {
+      await upsertPromoCode(
+        cc, db,
+        { ...customer, points_balance: newBalance, lifetime_points: newLifetime },
+        promoValueCents,
+        settings.promo_code_prefix,
+        merchant.loyalty_container_id,
+        rewardTypes,
+      );
+    } catch { /* best-effort promo sync */ }
+  }
+
+  const promoValueEur = pointsToEur(newBalance, settings.points_to_eur_rate);
+  const code = customer.promo_code ?? `${settings.promo_code_prefix}${customer.cloudcart_id}`;
+  const note = buildCustomerNote(newBalance, newTier, code, promoValueEur);
+  const ccAttrs: Partial<{ note: string; group_id: number }> = { note };
+  if (newTier?.cloudcart_group_id) ccAttrs.group_id = newTier.cloudcart_group_id;
+
+  try {
+    await cc.updateCustomer(customer.cloudcart_id, ccAttrs);
+  } catch { /* best-effort CloudCart sync */ }
+
+  try {
+    await assignEligibleRewards({
+      db, cc, merchant,
+      customer: { ...customer, points_balance: newBalance },
+      rewardTypes,
+    });
+  } catch { /* best-effort reward assignment */ }
+
+  return { ordersProcessed, pointsAwarded: totalPointsAwarded, newBalance };
 }
 
 // ============================================================
@@ -366,6 +567,14 @@ export async function awardPoints(params: {
   const ccAttrs: Partial<{ note: string; group_id: number }> = { note };
   if (newTier?.cloudcart_group_id) ccAttrs.group_id = newTier.cloudcart_group_id;
   await cc.updateCustomer(cloudcartCustomerId, ccAttrs);
+
+  try {
+    await assignEligibleRewards({
+      db, cc, merchant,
+      customer: freshCustomer,
+      rewardTypes,
+    });
+  } catch { /* best-effort reward assignment */ }
 
   return { points, newBalance };
 }

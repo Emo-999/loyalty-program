@@ -179,9 +179,11 @@ export class CloudCartClient {
     page = 1,
     size = 50,
     filterStatus?: string,
+    filterCustomerId?: number,
   ): Promise<JsonApiList<CCOrder>> {
     let path = `/orders?page[number]=${page}&page[size]=${size}`;
     if (filterStatus) path += `&filter[status]=${filterStatus}`;
+    if (filterCustomerId) path += `&filter[customer_id]=${filterCustomerId}`;
     return this.req<JsonApiList<CCOrder>>('GET', path);
   }
 

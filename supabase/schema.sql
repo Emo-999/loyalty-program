@@ -136,6 +136,21 @@ CREATE TABLE IF NOT EXISTS bonus_rules (
 );
 
 -- ============================================================
+-- Customer rewards (issued voucher codes per customer)
+-- ============================================================
+CREATE TABLE IF NOT EXISTS customer_rewards (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  merchant_id UUID NOT NULL REFERENCES merchants(id) ON DELETE CASCADE,
+  customer_id UUID NOT NULL REFERENCES loyalty_customers(id) ON DELETE CASCADE,
+  reward_type_id UUID NOT NULL REFERENCES reward_types(id) ON DELETE CASCADE,
+  voucher_code TEXT NOT NULL,
+  cloudcart_pro_code_id INTEGER,
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'redeemed', 'expired')),
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  UNIQUE (customer_id, reward_type_id)
+);
+
+-- ============================================================
 -- Processed orders (idempotency per merchant)
 -- ============================================================
 CREATE TABLE IF NOT EXISTS processed_orders (
@@ -171,6 +186,8 @@ CREATE INDEX IF NOT EXISTS idx_loyalty_customers_email ON loyalty_customers(merc
 CREATE INDEX IF NOT EXISTS idx_points_transactions_customer ON points_transactions(customer_id);
 CREATE INDEX IF NOT EXISTS idx_points_transactions_merchant ON points_transactions(merchant_id);
 CREATE INDEX IF NOT EXISTS idx_bonus_rules_merchant_active ON bonus_rules(merchant_id) WHERE active = TRUE;
+CREATE INDEX IF NOT EXISTS idx_customer_rewards_customer ON customer_rewards(customer_id);
+CREATE INDEX IF NOT EXISTS idx_customer_rewards_merchant ON customer_rewards(merchant_id);
 CREATE INDEX IF NOT EXISTS idx_processed_orders_merchant ON processed_orders(merchant_id);
 CREATE INDEX IF NOT EXISTS idx_webhook_logs_merchant ON webhook_logs(merchant_id);
 

@@ -74,9 +74,10 @@ This automatically:
 ## 4. Merchant First Login
 
 1. Go to `/admin` and enter the store slug + password
-2. Click **Run Setup** — creates CloudCart customer groups + webhooks
-3. Click **Sync Customers** — imports existing CloudCart customers
+2. Click **Run Setup** — creates discount container, CloudCart customer groups + webhooks
+3. Click **Sync Customers** — imports existing CloudCart customers **and** processes their order history to retroactively award points, assign tiers, and issue eligible reward vouchers
 4. Configure reward types, bonus rules, and settings as needed
+5. Optionally change the **trigger status** in Settings (default: `paid`, can be `completed` or `fulfilled`)
 
 ---
 
@@ -84,12 +85,21 @@ This automatically:
 
 ### Points earn flow
 1. Customer places an order on the CloudCart store
-2. When order status matches trigger (default: `paid`), CloudCart fires a webhook
+2. When order status matches trigger (configurable: `paid`, `completed`, or `fulfilled`), CloudCart fires a webhook
 3. Worker receives at `POST /webhook/{slug}/cloudcart`, validates the secret
 4. Calculates points: `floor(order_total_EUR × points_per_EUR)` + bonus rules
 5. Updates Supabase: balance, lifetime points, tier, transaction log
 6. Creates/updates personal promo code on CloudCart (discount-codes-pro)
 7. Updates customer note + tier group on CloudCart
+8. Auto-assigns eligible reward vouchers (e.g. Free Shipping at 500 pts)
+
+### Customer sync
+- **Individual sync** (per customer): fetches all orders from CloudCart matching the trigger status, awards points for unprocessed orders, updates tier, and issues eligible reward vouchers
+- **Bulk sync** (Sync Customers button): imports all CloudCart customers and processes their full order history
+- Both are idempotent — already-processed orders are skipped via the `processed_orders` table
+
+### Auto-reward vouchers
+When a customer reaches a reward's point threshold, a unique voucher code is automatically created on CloudCart as a `discount-codes-pro` entry. Tracked in `customer_rewards` (one per reward type per customer). Visible in the dashboard via the **Vouchers** button on each customer and the **Issued Vouchers** section in the Rewards tab.
 
 ### Discount types
 Merchants configure **Reward Types** in the dashboard:

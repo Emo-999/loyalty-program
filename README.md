@@ -55,6 +55,10 @@ The system supports multiple discount types through the CloudCart `discount-code
 
 Merchants configure these as **Reward Types** in the dashboard. The default auto-applied reward converts points to a flat EUR discount. Additional rewards (free shipping at 500 pts, 10% off at 1000 pts) are created automatically for new merchants.
 
+### Auto-Reward Vouchers
+
+When a customer's points balance reaches a reward's threshold (`min_points_cost`), a unique voucher code is automatically created on CloudCart as a `discount-codes-pro` entry. These are tracked in the `customer_rewards` table and visible in the dashboard under each customer's **Vouchers** button and the **Issued Vouchers** section of the Rewards tab.
+
 ---
 
 ## Tech Stack
@@ -107,6 +111,7 @@ supabase/
 | `loyalty_customers` | Customer points/tiers scoped by merchant |
 | `points_transactions` | Full audit log per merchant |
 | `bonus_rules` | Bonus point rules per merchant |
+| `customer_rewards` | Issued voucher codes per customer per reward type |
 | `processed_orders` | Idempotency per merchant |
 | `webhook_logs` | Raw webhook payloads per merchant |
 
@@ -197,11 +202,13 @@ curl -X POST https://loyalty-program.YOUR.workers.dev/api/super/merchants \
 | `GET` | `/api/m/:slug/admin/customers` | List customers |
 | `POST` | `/api/m/:slug/admin/customers/:id/adjust` | Adjust points |
 | `POST` | `/api/m/:slug/admin/customers/:id/redeem` | Redeem points |
-| `POST` | `/api/m/:slug/admin/customers/:id/sync` | Sync to CloudCart |
+| `POST` | `/api/m/:slug/admin/customers/:id/sync` | Sync orders + assign rewards |
+| `GET` | `/api/m/:slug/admin/customers/:id/rewards` | Customer's issued vouchers |
+| `GET` | `/api/m/:slug/admin/rewards/issued` | All issued vouchers |
 | `GET` | `/api/m/:slug/admin/stats` | Stats overview |
 | `GET` | `/api/m/:slug/admin/transactions` | Transaction log |
 | `POST` | `/api/m/:slug/setup` | Run initial setup |
-| `POST` | `/api/m/:slug/setup/sync-existing` | Import customers |
+| `POST` | `/api/m/:slug/setup/sync-existing` | Import customers + process orders |
 
 ### Super-Admin (X-Super-Admin-Key header required)
 
@@ -224,5 +231,5 @@ curl -X POST https://loyalty-program.YOUR.workers.dev/api/super/merchants \
 ### Key Notes
 - **CloudCart base URL**: Just the domain (e.g. `https://smokezone.cloudcart.net`). The code auto-appends `/api/v2`.
 - **Alpine.js**: v3 is used for the dashboard (login uses `x-data` component pattern, not the v2 `__x.$data` API).
-- **Schema migration**: `schema.sql` drops all tables with CASCADE before recreating — safe to re-run but destructive.
+- **Schema migration**: `schema.sql` drops all tables with CASCADE before recreating — safe to re-run but destructive. The `customer_rewards` table must also exist (included in `schema.sql`).
 - **Safety cap**: Webhook ignores orders over €500,000 as a fraud safeguard.

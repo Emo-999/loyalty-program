@@ -7,13 +7,15 @@ export function getSupabase(env: Env): SupabaseClient {
   });
 }
 
+const MERCHANT_SAFE_COLUMNS = 'id, slug, store_name, cloudcart_base_url, cloudcart_api_key, cloudcart_pat_token, admin_email, webhook_secret, loyalty_container_id, active, created_at, updated_at';
+
 export async function getMerchantBySlug(
   db: SupabaseClient,
   slug: string,
 ): Promise<DbMerchant | null> {
   const { data } = await db
     .from('merchants')
-    .select('*')
+    .select(MERCHANT_SAFE_COLUMNS)
     .eq('slug', slug)
     .eq('active', true)
     .maybeSingle();
@@ -26,7 +28,7 @@ export async function getMerchantById(
 ): Promise<DbMerchant | null> {
   const { data } = await db
     .from('merchants')
-    .select('*')
+    .select(MERCHANT_SAFE_COLUMNS)
     .eq('id', id)
     .eq('active', true)
     .maybeSingle();

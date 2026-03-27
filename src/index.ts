@@ -8,6 +8,46 @@ import setupRouter from './routes/setup';
 import customerRouter from './routes/customer';
 import { dashboardHtml, loginHtml } from './ui/dashboard';
 
+// HMAC-SHA256 signed tokens (no external JWT library needed)
+async function hmacKey(secret: string): Promise<CryptoKey> {
+  return crypto.subtle.importKey(
+    'raw', new TextEncoder().encode(secret),
+    { name: 'HMAC', hash: 'SHA-256' }, false, ['sign', 'verify'],
+  );
+}
+
+function b64url(buf: ArrayBuffer): string {
+  return btoa(String.fromCharCode(...new Uint8Array(buf)))
+    .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+function b64urlDecode(s: string): string {
+  const padded = s.replace(/-/g, '+').replace(/_/g, '/') + '=='.slice(0, (4 - s.length % 4) % 4);
+  return atob(padded);
+}
+
+async function signToken(payload: Record<string, unknown>, secret: string): Promise<string> {
+  const json = JSON.stringify(payload);
+  const encoded = btoa(json).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  const key = await hmacKey(secret);
+  const sig = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(encoded));
+  return encoded + '.' + b64url(sig);
+}
+
+async function verifyToken(token: string, secret: string): Promise<Record<string, unknown> | null> {
+  const parts = token.split('.');
+  if (parts.length !== 2) return null;
+  const [encoded, sig] = parts;
+  const key = await hmacKey(secret);
+  const sigBytes = Uint8Array.from(b64urlDecode(sig), c => c.charCodeAt(0));
+  const valid = await crypto.subtle.verify('HMAC', key, sigBytes, new TextEncoder().encode(encoded));
+  if (!valid) return null;
+  const json = b64urlDecode(encoded);
+  const payload = JSON.parse(json);
+  if (payload.exp && Date.now() / 1000 > payload.exp) return null;
+  return payload;
+}
+
 const app = new Hono<{ Bindings: Env; Variables: AppVariables }>();
 
 app.use('*', cors());
@@ -33,40 +73,48 @@ app.post('/api/login', async (c) => {
     return c.json({ error: 'slug and password required' }, 400);
   }
 
-  const merchant = await getMerchantBySlug(db, slug);
+  const { data: merchant } = await db
+    .from('merchants')
+    .select('id, slug, store_name, admin_password_hash')
+    .eq('slug', slug)
+    .eq('active', true)
+    .maybeSingle();
+
   if (!merchant) {
     return c.json({ error: 'Invalid credentials' }, 401);
   }
 
-  const { data: match } = await db.rpc('check_password', {
-    hashed: merchant.admin_password_hash,
-    plain: password,
+  // Try hash-based verification first
+  const { data: sqlMatch } = await db.rpc('verify_merchant_password', {
+    merchant_slug: slug,
+    plain_password: password,
   });
 
-  // Fallback: direct bcrypt comparison via pgcrypto
-  if (match === false || match === null) {
-    const { data: bcryptMatch } = await db
-      .from('merchants')
-      .select('id')
-      .eq('slug', slug)
-      .eq('admin_password_hash', password)
-      .maybeSingle();
+  if (!sqlMatch) {
+    // Fallback: check_password with the stored hash directly
+    const { data: hashMatch } = await db.rpc('check_password', {
+      hashed: merchant.admin_password_hash,
+      plain: password,
+    });
 
-    // If plaintext match also fails, check with SQL crypt()
-    if (!bcryptMatch) {
-      const { data: sqlMatch } = await db.rpc('verify_merchant_password', {
-        merchant_slug: slug,
-        plain_password: password,
-      });
-      if (!sqlMatch) {
+    if (!hashMatch) {
+      // One-time migration: if password is stored unhashed, verify and re-hash
+      if (merchant.admin_password_hash === password) {
+        const { data: newHash } = await db.rpc('hash_password', { plain: password });
+        if (newHash) {
+          await db.from('merchants').update({ admin_password_hash: newHash }).eq('id', merchant.id);
+        }
+      } else {
         return c.json({ error: 'Invalid credentials' }, 401);
       }
     }
   }
 
-  // Return a simple token: base64(merchant_id:slug)
-  // In production, use JWT. This is secure enough behind HTTPS + short-lived.
-  const token = btoa(`${merchant.id}:${merchant.slug}`);
+  const now = Math.floor(Date.now() / 1000);
+  const token = await signToken(
+    { sub: merchant.id, slug: merchant.slug, iat: now, exp: now + 86400 },
+    c.env.SUPER_ADMIN_KEY,
+  );
 
   return c.json({
     ok: true,
@@ -80,58 +128,47 @@ app.post('/api/login', async (c) => {
 
 // ============================================================
 // Merchant auth middleware for /api/m/:slug/*
-// Accepts either Basic Auth or Bearer token from login
+// Verifies JWT Bearer token from login
 // ============================================================
 app.use('/api/m/:slug/*', async (c, next) => {
   const db = getSupabase(c.env);
   const slug = c.req.param('slug');
 
-  const merchant = await getMerchantBySlug(db, slug);
-  if (!merchant) {
-    return c.json({ error: 'Merchant not found' }, 404);
+  const authHeader = c.req.header('Authorization') ?? '';
+  if (!authHeader.startsWith('Bearer ')) {
+    return c.json({ error: 'Authentication required' }, 401);
   }
 
-  const authHeader = c.req.header('Authorization') ?? '';
+  const token = authHeader.slice(7);
 
-  // Bearer token auth
-  if (authHeader.startsWith('Bearer ')) {
-    const token = authHeader.slice(7);
+  let merchantId: string | null = null;
+
+  // Try signed token verification
+  const payload = await verifyToken(token, c.env.SUPER_ADMIN_KEY);
+  if (payload && payload.slug === slug) {
+    merchantId = payload.sub as string;
+  }
+
+  // Fallback: legacy base64 tokens (remove after all sessions expire)
+  if (!merchantId) {
     try {
       const decoded = atob(token);
       const [id, tokenSlug] = decoded.split(':');
-      if (id === merchant.id && tokenSlug === merchant.slug) {
-        c.set('merchant', merchant);
-        return next();
-      }
-    } catch { /* invalid token */ }
-    return c.json({ error: 'Invalid token' }, 401);
+      if (tokenSlug === slug) merchantId = id;
+    } catch { /* not a valid token */ }
   }
 
-  // Basic Auth
-  if (authHeader.startsWith('Basic ')) {
-    const decoded = atob(authHeader.slice(6));
-    const [, password] = decoded.split(':');
-
-    // Check password via pgcrypto
-    const { data: sqlMatch } = await db.rpc('verify_merchant_password', {
-      merchant_slug: slug,
-      plain_password: password,
-    });
-    if (sqlMatch) {
-      c.set('merchant', merchant);
-      return next();
-    }
-
-    // Fallback: plaintext comparison (for dev/testing)
-    if (password === merchant.admin_password_hash) {
-      c.set('merchant', merchant);
-      return next();
-    }
-
-    return c.json({ error: 'Invalid credentials' }, 401);
+  if (!merchantId) {
+    return c.json({ error: 'Invalid or expired token' }, 401);
   }
 
-  return c.json({ error: 'Authentication required' }, 401);
+  const merchant = await getMerchantBySlug(db, slug);
+  if (!merchant || merchant.id !== merchantId) {
+    return c.json({ error: 'Merchant not found' }, 404);
+  }
+
+  c.set('merchant', merchant);
+  return next();
 });
 
 // Serve merchant dashboard
@@ -168,10 +205,13 @@ app.post('/api/super/merchants', async (c) => {
     return c.json({ error: 'All fields required: slug, store_name, cloudcart_base_url, cloudcart_api_key, admin_email, admin_password' }, 400);
   }
 
-  // Hash password via pgcrypto
-  const { data: hashResult } = await db.rpc('hash_password', {
+  const { data: hashResult, error: hashErr } = await db.rpc('hash_password', {
     plain: body.admin_password,
   });
+
+  if (hashErr || !hashResult) {
+    return c.json({ error: 'Password hashing failed — check pgcrypto functions' }, 500);
+  }
 
   const webhookSecret = crypto.randomUUID().replace(/-/g, '');
 
@@ -181,9 +221,9 @@ app.post('/api/super/merchants', async (c) => {
     cloudcart_base_url: body.cloudcart_base_url.replace(/\/+$/, ''),
     cloudcart_api_key: body.cloudcart_api_key,
     admin_email: body.admin_email,
-    admin_password_hash: hashResult ?? body.admin_password,
+    admin_password_hash: hashResult,
     webhook_secret: webhookSecret,
-  }).select().single();
+  }).select('id, slug, store_name').single();
 
   if (error) return c.json({ error: error.message }, 400);
 
@@ -221,14 +261,6 @@ app.get('/api/super/merchants', async (c) => {
 // ============================================================
 // Health check
 // ============================================================
-app.get('/', (c) =>
-  c.json({
-    service: 'Loyalty Program (Multi-Tenant)',
-    status: 'ok',
-    login: '/admin',
-    docs: '/api/super/merchants (super-admin)',
-    webhook_pattern: '/webhook/:slug/cloudcart',
-  }),
-);
+app.get('/', (c) => c.redirect('/admin'));
 
 export default app;

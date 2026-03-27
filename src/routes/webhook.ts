@@ -67,7 +67,7 @@ webhook.post('/:slug/cloudcart', async (c) => {
   }
 
   const secret = c.req.header('X-Loyalty-Secret');
-  if (merchant.webhook_secret && secret !== merchant.webhook_secret) {
+  if (!merchant.webhook_secret || secret !== merchant.webhook_secret) {
     return c.json({ error: 'Unauthorized' }, 401);
   }
 
@@ -162,15 +162,21 @@ webhook.post('/:slug/cloudcart', async (c) => {
 
 /**
  * GET /webhook/:slug/cloudcart/logs
+ * Requires X-Loyalty-Secret header for authentication
  */
 webhook.get('/:slug/cloudcart/logs', async (c) => {
   const db = getSupabase(c.env);
   const merchant = await getMerchantBySlug(db, c.req.param('slug'));
   if (!merchant) return c.json({ error: 'Unknown merchant' }, 404);
 
+  const secret = c.req.header('X-Loyalty-Secret');
+  if (!secret || secret !== merchant.webhook_secret) {
+    return c.json({ error: 'Unauthorized' }, 401);
+  }
+
   const { data } = await db
     .from('webhook_logs')
-    .select('*')
+    .select('id, merchant_id, headers, created_at')
     .eq('merchant_id', merchant.id)
     .order('created_at', { ascending: false })
     .limit(20);

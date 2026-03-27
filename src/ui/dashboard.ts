@@ -919,7 +919,9 @@ function app() {
         body: body ? JSON.stringify(body) : undefined,
       });
       if (res.status === 401) { this.logout(); return; }
-      const data = await res.json();
+      const text = await res.text();
+      let data;
+      try { data = JSON.parse(text); } catch { data = { error: text || 'Server error' }; }
       if (!res.ok) throw new Error(data.error ?? 'API error');
       return data;
     },

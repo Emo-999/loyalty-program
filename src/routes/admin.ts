@@ -499,7 +499,7 @@ admin.post('/customers/:id/sync', async (c) => {
   const merchant = c.get('merchant');
   const db = getSupabase(c.env);
   const cc = CloudCartClient.forMerchant(merchant);
-  const gql = CloudCartGqlClient.forMerchant(merchant);
+  let gql = CloudCartGqlClient.forMerchant(merchant);
   const settings = await loadSettings(db, merchant.id);
 
   const { data: customer, error } = await db
@@ -527,13 +527,30 @@ admin.post('/customers/:id/sync', async (c) => {
     .eq('active', true)
     .order('sort_order', { ascending: true });
 
-  const result = await processHistoricalOrders({
-    db, cc, gql, merchant, settings,
-    tiers: tiers ?? [],
-    bonusRules: bonusRules ?? [],
-    rewardTypes: rewardTypes ?? [],
-    customer,
-  });
+  let result;
+  try {
+    result = await processHistoricalOrders({
+      db, cc, gql, merchant, settings,
+      tiers: tiers ?? [],
+      bonusRules: bonusRules ?? [],
+      rewardTypes: rewardTypes ?? [],
+      customer,
+    });
+  } catch (e) {
+    // If GraphQL failed, retry with REST only
+    if (gql) {
+      gql = null;
+      result = await processHistoricalOrders({
+        db, cc, gql: null, merchant, settings,
+        tiers: tiers ?? [],
+        bonusRules: bonusRules ?? [],
+        rewardTypes: rewardTypes ?? [],
+        customer,
+      });
+    } else {
+      return c.json({ error: e instanceof Error ? e.message : 'Sync failed' }, 500);
+    }
+  }
 
   const freshCustomer = await db
     .from('loyalty_customers')
